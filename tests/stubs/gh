@@ -1,0 +1,107 @@
+#!/bin/bash
+# tests/run.sh 用の偽の gh。本物の GitHub には触れない。呼ばれた引数を STUB_LOG に「gh <引数...>」で1行残す。
+# 環境変数: STUB_LOG, STUB_GH_LOGIN(1 で gh auth token が失敗), STUB_GH_TOKEN_FILE(あれば、gh auth token がその中身を出す),
+#           STUB_GH_USER(アカウント名), STUB_GH_USER_EXIT,
+#           STUB_GH_BASE(既定のブランチ), STUB_GH_FORK(true でフォーク), STUB_GH_REPO_EXIT,
+#           STUB_GH_REPO_JSON(gh repo view の元の JSON。-q の式を jq -r で当てはめる。あれば STUB_GH_BASE と STUB_GH_FORK は使わない),
+#           STUB_GH_LIST_EXIT(gh pr list --head の終了コード),
+#           STUB_GH_PRS_JSON(gh pr list --head の元の JSON。-q の式を jq -r で当てはめる), STUB_GH_EXISTING(開いている PR の URL),
+#           STUB_GH_LIST_COUNT(gh pr list --head の件数。無ければ URL があるとき 1、無いとき 0),
+#           STUB_GH_STATE(gh pr create が作った PR の URL を書くファイル。あれば gh pr list --head がその中身を出す),
+#           STUB_GH_TITLES(gh pr list --state all の題。複数行でもよい),
+#           STUB_GH_BODY_COPY(gh pr create の --body-file をここへ写す), STUB_GH_TOKEN_SEEN(gh pr create が受けた GH_TOKEN をここへ書く),
+#           STUB_GH_CREATED_ANYWAY(1 で、作られたが応答は失敗した場面),
+#           STUB_GH_CREATE_EXIT, STUB_GH_URL(作った PR の URL)
+echo "gh $*" >> "${STUB_LOG:-/dev/null}"
+
+# 引数 $1 の次の引数を出す。残りの引数から探す
+arg_after() {
+  local want="$1" prev=""
+  shift
+  for a in "$@"; do
+    if [ "$prev" = "$want" ]; then
+      printf '%s\n' "$a"
+      return 0
+    fi
+    prev="$a"
+  done
+  return 1
+}
+
+has_arg() {
+  local want="$1"
+  shift
+  for a in "$@"; do
+    [ "$a" = "$want" ] && return 0
+  done
+  return 1
+}
+
+case "${1:-}" in
+  --version)
+    echo "gh version 0.0.0-stub"
+    exit 0 ;;
+  auth)
+    if [ "${STUB_GH_LOGIN:-0}" = "1" ]; then
+      echo "You are not logged into any GitHub hosts." >&2
+      exit 1
+    fi
+    if [ -n "${STUB_GH_TOKEN_FILE:-}" ] && [ -f "$STUB_GH_TOKEN_FILE" ]; then
+      cat "$STUB_GH_TOKEN_FILE"
+    else
+      echo "stub-token"
+    fi
+    exit 0 ;;
+  api)
+    if [ -n "${STUB_GH_USER_EXIT:-}" ]; then exit "$STUB_GH_USER_EXIT"; fi
+    echo "${STUB_GH_USER:-stub-user}"
+    exit 0 ;;
+  repo)
+    if [ -n "${STUB_GH_REPO_EXIT:-}" ]; then exit "$STUB_GH_REPO_EXIT"; fi
+    if [ -n "${STUB_GH_REPO_JSON:-}" ]; then
+      expr="$(arg_after -q "$@" || true)"
+      printf '%s\n' "$STUB_GH_REPO_JSON" | jq -r "$expr"
+      exit $?
+    fi
+    echo "${STUB_GH_BASE:-main} ${STUB_GH_FORK:-false}"
+    exit 0 ;;
+  pr)
+    case "${2:-}" in
+      list)
+        if has_arg --head "$@"; then
+          if [ -n "${STUB_GH_LIST_EXIT:-}" ]; then exit "$STUB_GH_LIST_EXIT"; fi
+          if [ -n "${STUB_GH_PRS_JSON:-}" ]; then
+            expr="$(arg_after -q "$@" || true)"
+            printf '%s\n' "$STUB_GH_PRS_JSON" | jq -r "$expr"
+            exit $?
+          fi
+          # 出力は「<件数> <URL か空>」
+          url="${STUB_GH_EXISTING:-}"
+          if [ -n "${STUB_GH_STATE:-}" ] && [ -f "$STUB_GH_STATE" ]; then url="$(cat "$STUB_GH_STATE")"; fi
+          count="${STUB_GH_LIST_COUNT:-}"
+          if [ -z "$count" ]; then
+            if [ -n "$url" ]; then count=1; else count=0; fi
+          fi
+          echo "$count $url"
+          exit 0
+        fi
+        # --state all（直近の題）
+        if [ -n "${STUB_GH_TITLES:-}" ]; then printf '%s\n' "$STUB_GH_TITLES"; fi
+        exit 0 ;;
+      create)
+        if [ -n "${STUB_GH_TOKEN_SEEN:-}" ]; then printf '%s\n' "${GH_TOKEN:-}" > "$STUB_GH_TOKEN_SEEN"; fi
+        if [ -n "${STUB_GH_BODY_COPY:-}" ]; then
+          body="$(arg_after --body-file "$@" || true)"
+          [ -n "$body" ] && cp "$body" "$STUB_GH_BODY_COPY"
+        fi
+        if [ "${STUB_GH_CREATED_ANYWAY:-0}" = "1" ] && [ -n "${STUB_GH_STATE:-}" ]; then
+          echo "${STUB_GH_URL:-https://github.com/stub/repo/pull/1}" > "$STUB_GH_STATE"
+        fi
+        if [ -n "${STUB_GH_CREATE_EXIT:-}" ] && [ "$STUB_GH_CREATE_EXIT" != "0" ]; then exit "$STUB_GH_CREATE_EXIT"; fi
+        echo "${STUB_GH_URL:-https://github.com/stub/repo/pull/1}"
+        exit 0 ;;
+    esac ;;
+esac
+
+echo "stub gh: 知らない呼び方: $*" >&2
+exit 2

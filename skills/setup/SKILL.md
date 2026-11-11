@@ -8,7 +8,7 @@ description: dev-relay が使う道具（Codex CLI、Cursor CLI、jq、Herdr）�
 dev-relay が使う道具の状態を調べ、足りないものを案内し、設定を決める。
 
 - 利用者に選んでもらうところは、すべて選択式にする（AskUserQuestion）。自由記述で答えさせない。
-- Codex CLI、Cursor CLI、`jq` は、このスキルでは入れない。インストールとログインに契約と対話が要るため。入れ方を示すだけにする。
+- Codex CLI、Cursor CLI、GitHub CLI、`jq` は、このスキルでは入れない。インストールとログインに契約と対話が要るため。入れ方を示すだけにする。
 - 入れるのは Herdr（`hc`）だけ。利用者が手順3で選んだときに限る。
 
 ## 手順
@@ -20,8 +20,8 @@ dev-relay が使う道具の状態を調べ、足りないものを案内し、�
 | 道具 | 状態 | 無いとどうなるか |
 |---|---|---|
 
-- `tool.codex`、`tool.cursor`、`tool.jq`、`tool.herdr` の値を状態の列に書く。
-- 無いとどうなるか: Codex CLI は、レビュアーに Codex を選べない。Cursor CLI は、Cursor 経由のレビュアーを選べない。`jq` は、Cursor のレビュアーが動かない（Codex だけ、または Claude だけなら要らない）。Herdr は、レビューの途中経過を端末で見られないだけで、手順は同じように動く。
+- `tool.codex`、`tool.cursor`、`tool.gh`、`tool.jq`、`tool.herdr` の値を状態の列に書く。
+- 無いとどうなるか: Codex CLI は、レビュアーに Codex を選べない。Cursor CLI は、Cursor 経由のレビュアーを選べない。GitHub CLI（`gh`）は、PR 関連のスキル（`pr-open`）が使えない（`dev` は動く）。`jq` は、Cursor のレビュアーが動かない（Codex だけ、または Claude だけなら要らない）。Herdr は、レビューの途中経過を端末で見られないだけで、手順は同じように動く。
 - どちらの CLI も無くても、Claude のレビュアーで最後まで進む。
 
 ### 2. 足りない道具の入れ方を示す
@@ -30,6 +30,7 @@ dev-relay が使う道具の状態を調べ、足りないものを案内し、�
 
 - Codex CLI: `npm i -g @openai/codex` のあと `codex login`
 - Cursor CLI: 公式の案内（https://cursor.com/docs/cli/overview）に従って入れ、`cursor-agent login`
+- GitHub CLI: 公式の案内に従って入れ、`gh auth login`。このスキルでは入れない。PR を作るスキル（`pr-open`）だけが使う
 - `jq`: Cursor のレビュアーを使うときだけ要る
 
 ### 3. Herdr を入れるか尋ねる

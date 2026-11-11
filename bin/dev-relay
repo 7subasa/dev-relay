@@ -25,7 +25,15 @@ usage() {
   config notice [on|off]
   config vendors [--user <一覧|none|ask> | --repo <一覧|none> | --repo --reset]
   config role <役割> [--from <ファイル> | --keep | --reset]
+  config pr [--repo <on|off> | --repo --reset]
                 利用者の設定を表示・変更する
+  pr status [--base BRANCH]     PR を作る前提を確かめる（止める理由も表示する）
+  pr recent                     題と本文の言語を決める材料（直近の PR の題、無ければコミットの題）を表示する
+  pr draft-path                 下書きの本文を置くパスを表示する
+  pr check FILE [--no-sections] [--title S]
+                本文の形と、手元のパスや秘密の混入を調べる
+  pr create --title S --body-file FILE [--base BRANCH] [--draft] [--no-sections] (--dry-run | --confirm VALUE)
+                確認の値を出す（--dry-run）、または確認の値を受けて push と PR の作成をする（--confirm）
 
 各サブコマンドの詳細は dev-relay <サブコマンド> --help。
 EOF
@@ -37,6 +45,7 @@ case "${1:-}" in
   doctor) shift; exec bash "$DEV_RELAY_ROOT/scripts/doctor.sh" "$@" ;;
   config) shift; exec bash "$DEV_RELAY_ROOT/scripts/config.sh" "$@" ;;
   refresh) shift; exec bash "$DEV_RELAY_ROOT/scripts/refresh.sh" "$@" ;;
+  pr) shift; exec bash "$DEV_RELAY_ROOT/scripts/pr.sh" "$@" ;;
   smoke) shift; exec bash "$DEV_RELAY_ROOT/scripts/smoke.sh" "$@" ;;
   *) echo "error: 知らないサブコマンドです: $1" >&2; usage >&2; exit 1 ;;
 esac

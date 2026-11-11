@@ -72,6 +72,12 @@ new_env() {
   unset STUB_CODEX_VERSION STUB_CURSOR_VERSION STUB_VERSION_SLEEP STUB_VERSION_ORPHAN STUB_VERSION_IGNORE
   unset STUB_CURSOR_BODY STUB_CURSOR_MODELS STUB_CURSOR_MODELS_EXIT
   unset DEV_RELAY_TODAY CODEX_HOME
+  unset STUB_GH_LOGIN STUB_GH_USER STUB_GH_USER_EXIT STUB_GH_BASE STUB_GH_FORK STUB_GH_REPO_EXIT
+  unset STUB_GH_LIST_EXIT STUB_GH_LIST_COUNT STUB_GH_PRS_JSON STUB_GH_EXISTING STUB_GH_STATE
+  unset STUB_GH_TITLES STUB_GH_BODY_COPY STUB_GH_CREATED_ANYWAY STUB_GH_CREATE_EXIT STUB_GH_URL
+  unset STUB_GH_TOKEN_FILE STUB_GH_TOKEN_SEEN STUB_GIT_SWITCH_TOKEN GH_HOST GH_TOKEN
+  unset STUB_GH_REPO_JSON GITHUB_TOKEN GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  unset STUB_REAL_GIT STUB_GIT_REDIRECT_TO STUB_GIT_REDIRECT_FROM GIT_ALLOW_PROTOCOL
   : > "$STUB_LOG"
   REPO="$T/repo"
   git init -q "$REPO"
@@ -107,6 +113,7 @@ without_timeout_tools() {
 
 with_codex()  { ln -s "$ROOT/tests/stubs/codex" "$T/bin/codex"; }
 with_cursor() { ln -s "$ROOT/tests/stubs/cursor-agent" "$T/bin/cursor-agent"; }
+with_gh()     { ln -s "$ROOT/tests/stubs/gh" "$T/bin/gh"; }
 
 # dev-relay を対象のリポジトリで実行し、標準出力を $T/out、標準エラーを $T/err、終了コードを RC に入れる
 dr() {
@@ -207,6 +214,132 @@ smoke_env() {
   good="$(review_body)"
   export STUB_CODEX_BODY="$good" STUB_CURSOR_BODY="$good"
 }
+
+# ---- P2: PR を作る（テストの道具） ------------------------------------------
+
+# このファイル自体が公開チェックの対象なので、メールアドレスや手元のパスや鍵の形は、2つの文字列をつないで作る
+AT="@"
+GH_STUB_URL="https://github.com/stub/repo.git"
+LEAK_MAC="/Us""ers/alice/work"
+LEAK_LINUX="/ho""me/alice/work"
+LEAK_WIN="C:\\Us""ers\\alice"
+LEAK_SK="sk""-abcdefghijklmnopqrstuvwx0123"
+LEAK_GH="gh""p_0123456789abcdefghijklmnopqrstuvwxyzAB"
+LEAK_AWS="AK""IAABCDEFGHIJKLMNOP"
+LEAK_KEY="-----BEGIN RSA PRI""VATE KEY-----"
+
+# 形式どおりの PR の本文（6つの節。Verification にフェンス）を標準出力に出す。環境変数で、1か所だけ変えられる:
+#   PB_WITHOUT=<節>[;<節>...]   その節の見出しと中身を除く
+#   PB_EMPTY=<節>               その節の中身を空にする
+#   PB_SWAP=1                   Why と What changed を入れ替える
+#   PB_NOFENCE=1                Verification のフェンスを除く
+#   PB_FENCE_LINE=<行>          Verification のフェンスの中に1行足す
+#   PB_EXTRA=<行>               What changed に行を足す（改行を含んでよい）
+#   PB_PAD=<数>                 Scope に、空でない行を数だけ足す
+#   PB_REPLACE=<節>             その節の中身を、PB_REPLACE_TEXT（改行を含んでよい）に置き換える
+#   PB_TAIL=<行>                ファイルの終わりに行を足す（改行を含んでよい）
+pr_body() {
+  local s i fence='```'
+  local order=(Why "What changed" Scope Tradeoffs "Blast Radius" Verification)
+  if [ "${PB_SWAP:-}" = 1 ]; then order=("What changed" Why Scope Tradeoffs "Blast Radius" Verification); fi
+  for s in "${order[@]}"; do
+    case ";${PB_WITHOUT:-};" in *";${s};"*) continue ;; esac
+    printf '## %s\n\n' "$s"
+    if [ "${PB_REPLACE:-}" = "$s" ]; then
+      printf '%s\n' "${PB_REPLACE_TEXT:-}"
+    elif [ "${PB_EMPTY:-}" != "$s" ]; then
+      case "$s" in
+        Why) printf '利用者が下書きを見てから PR を作れるようにする。\n' ;;
+        "What changed")
+          printf -- '- 本文を検査してから push する。\n'
+          if [ -n "${PB_EXTRA:-}" ]; then printf '%s\n' "$PB_EXTRA"; fi ;;
+        Scope)
+          printf '含めたもの: 検査と作成。含めなかったもの: マージ。\n'
+          i=0
+          while [ "$i" -lt "${PB_PAD:-0}" ]; do
+            i=$((i + 1))
+            printf '補足 %s\n' "$i"
+          done ;;
+        Tradeoffs) printf 'コマンドにまとめた。スキルの文章だけにする案は捨てた。\n' ;;
+        "Blast Radius") printf '新しいコマンドだけ。戻すときは変更を取り消す。\n' ;;
+        Verification)
+          printf '実行した結果:\n'
+          if [ "${PB_NOFENCE:-}" != 1 ]; then
+            printf '%s\n$ bash tests/run.sh\n10 passed, 0 failed\n' "$fence"
+            if [ -n "${PB_FENCE_LINE:-}" ]; then printf '%s\n' "$PB_FENCE_LINE"; fi
+            printf '%s\n' "$fence"
+          fi ;;
+      esac
+    fi
+    printf '\n'
+  done
+  if [ -n "${PB_TAIL:-}" ]; then printf '%s\n' "$PB_TAIL"; fi
+}
+
+# PR 用の環境を作る。許可済みのリポジトリで、リモート origin（URL は GitHub の形）の先は一時フォルダの bare リポジトリ。
+# main を push してあり、feature-x ブランチにコミットが1つある。push と fetch は bare に向く。
+# 本文のファイル（BODY）と題（TITLE）も用意する
+pr_env() {
+  new_env
+  STUB_REAL_GIT="$(command -v git)"
+  BARE="$T/remote.git"
+  "$STUB_REAL_GIT" init -q --bare "$BARE"
+  "$STUB_REAL_GIT" -C "$BARE" symbolic-ref HEAD refs/heads/main
+  with_gh
+  ln -s "$ROOT/tests/stubs/git" "$T/bin/git"
+  hash -r   # new_env が git を実行して覚えさせた場所（本物の git）を忘れさせ、差し替えを見つけさせる
+  # 手元の bare 以外へ出ていく通信（https、ssh）を禁じる。リダイレクトが外れても、本物の GitHub には届かない
+  export STUB_REAL_GIT STUB_GIT_REDIRECT_TO="$BARE" STUB_GIT_REDIRECT_FROM="$GH_STUB_URL" GIT_ALLOW_PROTOCOL=file GIT_TERMINAL_PROMPT=0
+  (
+    cd "$REPO" || exit 1
+    git checkout -q -- app.txt
+    git branch -M main
+    git remote add origin "$GH_STUB_URL"
+    git push -q origin main
+    git config dev-relay.pr on
+    git checkout -q -b feature-x
+    printf 'feature\n' > feature.txt
+    git add feature.txt
+    git commit -qm "add feature"
+  ) || fail "PR 用のリポジトリを作れなかった"
+  : > "$STUB_LOG"
+  BODY="$T/body.md"
+  TITLE="Add feature"
+  pr_body > "$BODY"
+}
+
+# origin の URL を替える。実際の通信は、同じ URL を bare に向けて続ける
+pr_set_url() {
+  git -C "$REPO" remote set-url origin "$1"
+  export STUB_GIT_REDIRECT_FROM="$1"
+}
+
+head_sha() { "$STUB_REAL_GIT" -C "$REPO" rev-parse HEAD; }
+bare_ref() { "$STUB_REAL_GIT" -C "$BARE" rev-parse -q --verify "refs/heads/$1" 2>/dev/null || true; }
+gh_creates() { grep -c '^gh pr create ' "$STUB_LOG" || true; }
+git_pushes() { grep -c '^git push ' "$STUB_LOG" || true; }
+
+# push も gh pr create も、していない
+assert_nothing_sent() {
+  assert_eq "$(gh_creates)" 0 "gh pr create の回数"
+  assert_eq "$(git_pushes)" 0 "git push の回数"
+  assert_eq "$(bare_ref feature-x)" "" "bare のブランチ"
+}
+
+# 標準出力の key が、与えた順に並んでいる（間に別の key があってよい）
+assert_key_order() {
+  local prev=0 k n
+  for k in "$@"; do
+    n="$(awk -F= -v k="$k" '$1 == k { print NR; exit }' "$T/out")"
+    if [ -z "$n" ]; then fail "出力に $k が無い"; continue; fi
+    [ "$n" -gt "$prev" ] || fail "$k が、前の key より上にある"
+    prev="$n"
+  done
+}
+
+# pr create を、確認の値を取る形（--dry-run）と、その値で作る形（--confirm）で呼ぶ。引数は、2つに共通の追加の引数
+pr_dry() { dr pr create --title "$TITLE" --body-file "$BODY" "$@" --dry-run; CONFIRM="$(kv pr.confirm)"; }
+pr_go()  { dr pr create --title "$TITLE" --body-file "$BODY" "$@" --confirm "$CONFIRM"; }
 
 # ---- テスト -----------------------------------------------------------------
 
@@ -1750,6 +1883,869 @@ t_notice_two_review_dates() {
   assert_eq "$(cat "$T/out")" "dev-relay: 見直す予定の日を過ぎました（2026-10-15 一件目 ほか1件）。/dev-relay:refresh で確認できます。" "通知の文"
 }
 
+# ---- P2: PR を作る -----------------------------------------------------------
+
+t_config_pr() {
+  new_env
+  dr config pr; assert_rc 0
+  assert_eq "$(kv pr)" unset "既定"
+  dr config pr --repo on; assert_rc 0
+  assert_eq "$(kv repo.pr)" on "--repo on の表示"
+  assert_eq "$(git -C "$REPO" config --local dev-relay.pr)" on "git のローカル設定"
+  dr config pr; assert_eq "$(kv pr)" on "on のあと"
+  dr config pr --repo off; assert_rc 0
+  assert_eq "$(kv repo.pr)" off "--repo off の表示"
+  dr config pr; assert_eq "$(kv pr)" off "off のあと"
+  dr config pr --repo --reset; assert_rc 0
+  dr config pr; assert_eq "$(kv pr)" unset "--reset のあと"
+  dr config pr --repo on
+  dr config pr --repo maybe; assert_rc 1
+  dr config pr --repo; assert_rc 1
+  dr config pr on; assert_rc 1
+  dr config pr; assert_eq "$(kv pr)" on "失敗した書き込みは値を変えない"
+  mkdir "$T/outside"
+  dr_in "$T/outside" config pr; assert_rc 0
+  assert_eq "$(kv pr)" unset "git リポジトリの外の表示"
+  dr_in "$T/outside" config pr --repo on; assert_rc 1
+  dr_in "$T/outside" config pr --repo --reset; assert_rc 1
+}
+
+t_config_pr_multiple_values() {
+  new_env
+  git -C "$REPO" config --local --add dev-relay.pr on
+  git -C "$REPO" config --local --add dev-relay.pr off
+  dr config pr --repo --reset; assert_rc 0
+  dr config pr; assert_eq "$(kv pr)" unset "値が2つあっても --reset で unset に戻る"
+  assert_eq "$(git -C "$REPO" config --local --get-all dev-relay.pr | wc -l | tr -d ' ')" 0 "--reset のあとの値の数"
+  git -C "$REPO" config --local --add dev-relay.pr on
+  git -C "$REPO" config --local --add dev-relay.pr off
+  dr config pr --repo on; assert_rc 0
+  dr config pr; assert_eq "$(kv pr)" on "値が2つあっても --repo on で書ける"
+  assert_eq "$(git -C "$REPO" config --local --get-all dev-relay.pr)" on "--repo on のあとの値は1つの on"
+  dr config pr --repo --reset; assert_rc 0
+  dr config pr --repo --reset; assert_rc 0
+  dr config pr; assert_eq "$(kv pr)" unset "設定が無いときの --reset"
+}
+
+t_doctor_gh() {
+  new_env
+  dr doctor; assert_rc 0
+  assert_eq "$(kv tool.gh)" not-installed "gh が無い"
+  assert_eq "$(kv tool.gh.version)" "" "gh が無いときは tool.gh.version を出さない"
+  with_gh
+  dr doctor; assert_rc 0
+  assert_eq "$(kv tool.gh)" ok "gh がある"
+  assert_eq "$(kv tool.gh.version)" "gh version 0.0.0-stub" "tool.gh.version"
+  assert_key_order tool.gh tool.gh.version tool.jq
+  assert_eq "$(kv repo.pr)" unset "repo.pr の既定"
+  assert_has "$STUB_LOG" "gh auth token --hostname github.com --no-refresh"
+  git -C "$REPO" config dev-relay.pr on
+  dr doctor; assert_eq "$(kv repo.pr)" on "repo.pr"
+  assert_key_order git.repo git.dirty repo.pr
+  export STUB_GH_LOGIN=1
+  dr doctor; assert_rc 0
+  assert_eq "$(kv tool.gh)" not-logged-in "未ログイン"
+  assert_eq "$(kv tool.gh.version)" "gh version 0.0.0-stub" "未ログインでも版は出る"
+  mkdir "$T/outside"
+  dr_in "$T/outside" doctor; assert_rc 0
+  assert_eq "$(kv repo.pr)" "" "git リポジトリの外では repo.pr を出さない"
+}
+
+t_pr_permission_values() {
+  pr_env
+  git -C "$REPO" config dev-relay.pr yes
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.allowed)" off "on / off 以外の値は off として扱う"
+  assert_eq "$(kv pr.blockers)" not-allowed "pr.blockers"
+  assert_contains "$(cat "$T/err")" "warning:" "標準エラーの警告"
+  dr config pr; assert_eq "$(kv pr)" off "config pr の表示"
+  git -C "$REPO" config dev-relay.pr on
+  git -C "$REPO" config --add dev-relay.pr on
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.allowed)" off "値が複数あれば off として扱う"
+  assert_eq "$(kv pr.blockers)" not-allowed "複数の値: pr.blockers"
+  assert_contains "$(cat "$T/err")" "warning:" "複数の値: 標準エラーの警告"
+}
+
+t_pr_status_ready() {
+  pr_env
+  dr pr status; assert_rc 0
+  assert_eq "$(kv tool.gh)" ok "tool.gh"
+  assert_eq "$(kv git.repo)" yes "git.repo"
+  assert_eq "$(kv pr.allowed)" on "pr.allowed"
+  assert_eq "$(kv pr.account)" stub-user "pr.account"
+  assert_eq "$(kv pr.remote)" origin "pr.remote"
+  assert_eq "$(kv pr.repo)" stub/repo "pr.repo"
+  assert_eq "$(kv pr.branch)" feature-x "pr.branch"
+  assert_eq "$(kv pr.head)" "$(head_sha)" "pr.head"
+  assert_eq "$(kv pr.base)" main "pr.base"
+  assert_eq "$(kv pr.base-sha)" "$(bare_ref main)" "pr.base-sha"
+  assert_eq "$(kv pr.dirty)" 0 "pr.dirty"
+  assert_eq "$(kv pr.ahead)" 1 "pr.ahead"
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  assert_eq "$(kv pr.blockers)" "" "pr.blockers"
+  assert_key_order tool.gh git.repo pr.allowed pr.account pr.remote pr.repo pr.branch pr.head pr.base pr.base-sha pr.dirty pr.ahead pr.ready
+  assert_has "$STUB_LOG" "gh auth token --hostname github.com --no-refresh"
+  assert_has "$STUB_LOG" "gh auth token --hostname github.com"
+  assert_has "$STUB_LOG" "gh api --hostname github.com user -q .login"
+  assert_has "$STUB_LOG" "gh repo view github.com/stub/repo --json defaultBranchRef,isFork -q"
+  assert_has "$STUB_LOG" "gh pr list -R github.com/stub/repo --head feature-x --state open --limit 100 --json url,isCrossRepository -q"
+  assert_eq "$(git -C "$REPO" for-each-ref refs/dev-relay)" "" "この実行だけの参照が残っていない"
+}
+
+t_pr_status_gh_host() {
+  pr_env
+  export GH_HOST=example.com
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.repo)" stub/repo "表示は OWNER/REPO のまま"
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  pr_dry; assert_rc 0
+  pr_go; assert_rc 0
+  dr pr recent; assert_rc 0
+  # リポジトリを渡す gh の呼び出しは、どれも github.com/stub/repo
+  assert_eq "$(grep -E '^gh (pr|repo) ' "$STUB_LOG" | grep -vc 'github.com/stub/repo' || true)" 0 "ホストの付かないリポジトリを渡した gh の呼び出し"
+  assert_has "$STUB_LOG" "gh repo view github.com/stub/repo"
+  assert_has "$STUB_LOG" "gh pr list -R github.com/stub/repo --head feature-x"
+  assert_has "$STUB_LOG" "gh pr list -R github.com/stub/repo --state all --limit 5"
+  assert_has "$STUB_LOG" "gh pr create -R github.com/stub/repo"
+}
+
+t_pr_status_permission() {
+  pr_env
+  git -C "$REPO" config --unset dev-relay.pr
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.allowed)" unset "pr.allowed"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  assert_eq "$(kv pr.blockers)" permission-unset "pr.blockers"
+  git -C "$REPO" config dev-relay.pr off
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.allowed)" off "pr.allowed"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  assert_eq "$(kv pr.blockers)" not-allowed "pr.blockers"
+}
+
+t_pr_status_no_lookup_without_permission() {
+  local p
+  pr_env
+  export STUB_GH_TITLES="$(printf 'Fix bug\nAdd login')"
+  git -C "$REPO" config --unset dev-relay.pr
+  for p in permission-unset not-allowed; do
+    if [ "$p" = not-allowed ]; then git -C "$REPO" config dev-relay.pr off; fi
+    : > "$STUB_LOG"
+    dr pr status; assert_rc 0
+    assert_eq "$(kv pr.blockers)" "$p" "pr.blockers ($p)"
+    assert_eq "$(kv pr.account)" "" "アカウントは出ない ($p)"
+    assert_eq "$(kv pr.base)" "" "ベースは出ない ($p)"
+    assert_eq "$(kv pr.existing)" "" "既存の PR は出ない ($p)"
+    assert_lacks "$STUB_LOG" "gh api"
+    assert_lacks "$STUB_LOG" "gh repo view"
+    assert_lacks "$STUB_LOG" "gh pr list"
+    assert_lacks "$STUB_LOG" "git fetch"
+    : > "$STUB_LOG"
+    dr pr recent; assert_rc 0
+    assert_eq "$(cat "$T/out")" "$(printf 'commit: add feature\ncommit: init')" "許可が無ければコミットの題だけ ($p)"
+    assert_lacks "$STUB_LOG" "gh pr list"
+  done
+}
+
+t_pr_status_gh_unavailable() {
+  pr_env
+  rm "$T/bin/gh"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv tool.gh)" not-installed "tool.gh"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  assert_eq "$(kv pr.blockers)" gh-not-installed "pr.blockers"
+  assert_eq "$(kv pr.account)" "" "gh が無ければアカウントは出ない"
+  assert_eq "$(grep -c '^gh ' "$STUB_LOG" || true)" 0 "gh の呼び出し"
+  with_gh
+  export STUB_GH_LOGIN=1
+  dr pr status; assert_rc 0
+  assert_eq "$(kv tool.gh)" not-logged-in "tool.gh"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  assert_eq "$(kv pr.blockers)" gh-not-logged-in "pr.blockers"
+  assert_eq "$(grep -c '^gh ' "$STUB_LOG" || true)" 1 "gh の呼び出しは、ログインの確認だけ"
+  assert_has "$STUB_LOG" "gh auth token --hostname github.com --no-refresh"
+}
+
+t_pr_status_no_default_branch() {
+  pr_env
+  need_jq || return 0
+  export STUB_GH_REPO_JSON='{"defaultBranchRef":null,"isFork":false}'
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" repo-unknown "既定のブランチが無い: pr.blockers"
+  assert_eq "$(kv pr.base)" "" "pr.base は出ない（null という名前にならない）"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  assert_lacks "$STUB_LOG" "git fetch"
+  export STUB_GH_REPO_JSON='{"defaultBranchRef":{"name":"main"},"isFork":false}'
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.base)" main "既定のブランチがある: pr.base"
+  assert_eq "$(kv pr.ready)" yes "本物の -q の式が jq で動く: pr.ready"
+}
+
+t_pr_status_states() {
+  pr_env
+  git -C "$REPO" checkout -q main
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.ready)" no "main の上: pr.ready"
+  assert_eq "$(kv pr.blockers)" "on-base;no-commits" "main の上: pr.blockers"
+  git -C "$REPO" checkout -q -b empty-x main
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" no-commits "コミットが無い: pr.blockers"
+  assert_eq "$(kv pr.ahead)" 0 "コミットが無い: pr.ahead"
+  # git init の直後（HEAD にコミットが1つも無い）
+  mkdir "$T/fresh"
+  git -C "$T/fresh" init -q
+  git -C "$T/fresh" config dev-relay.pr on
+  git -C "$T/fresh" remote add origin "$GH_STUB_URL"
+  dr_in "$T/fresh" pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" no-commits "コミットが1つも無いリポジトリ"
+  assert_eq "$(kv pr.ready)" no "コミットが1つも無いリポジトリ: pr.ready"
+  git -C "$REPO" checkout -q feature-x
+  export STUB_GH_EXISTING="https://github.com/stub/repo/pull/12"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" existing-pr "開いている PR: pr.blockers"
+  assert_eq "$(kv pr.existing)" "https://github.com/stub/repo/pull/12" "pr.existing"
+  assert_eq "$(kv pr.ready)" no "開いている PR: pr.ready"
+  unset STUB_GH_EXISTING
+  export STUB_GH_FORK=true
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" fork "フォーク: pr.blockers"
+  assert_eq "$(kv pr.ready)" no "フォーク: pr.ready"
+}
+
+t_pr_status_remote_problems() {
+  pr_env
+  git -C "$REPO" remote remove origin
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" no-remote "リモートが無い"
+  assert_eq "$(kv pr.ready)" no "リモートが無い: pr.ready"
+  assert_lacks "$STUB_LOG" "gh api"
+  assert_lacks "$STUB_LOG" "gh repo view"
+  assert_lacks "$STUB_LOG" "gh pr list"
+  git -C "$REPO" remote add origin "$GH_STUB_URL"
+  : > "$STUB_LOG"
+  pr_set_url "$BARE"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" not-github "手元のパス"
+  assert_lacks "$STUB_LOG" "gh repo view"
+  assert_lacks "$STUB_LOG" "gh pr list"
+  pr_set_url "git${AT}example.com:o/r.git"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" not-github "github.com 以外のホスト"
+  assert_eq "$(kv pr.ready)" no "github.com 以外のホスト: pr.ready"
+  mkdir "$T/outside"
+  dr_in "$T/outside" pr status; assert_rc 0
+  assert_eq "$(kv git.repo)" no "git リポジトリの外: git.repo"
+  assert_eq "$(kv pr.ready)" no "git リポジトリの外: pr.ready"
+  assert_eq "$(kv pr.blockers)" not-a-git-repo "git リポジトリの外: pr.blockers"
+  assert_eq "$(kv pr.repo)" "" "git リポジトリの外では pr.repo を出さない"
+}
+
+t_pr_status_url_forms() {
+  local u
+  pr_env
+  for u in "git${AT}github.com:o/r.git" "https://github.com/o/r" "ssh://git${AT}github.com/o/r.git" "https://github.com/o/r.git"; do
+    pr_set_url "$u"
+    dr pr status; assert_rc 0
+    assert_eq "$(kv pr.repo)" o/r "pr.repo ($u)"
+    assert_eq "$(kv pr.ready)" yes "pr.ready ($u)"
+  done
+}
+
+t_pr_status_two_remotes() {
+  pr_env
+  git -C "$REPO" remote add upstream "https://github.com/other/repo.git"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.remote)" origin "上流の設定が無ければ origin"
+  assert_eq "$(kv pr.repo)" stub/repo "上流の設定が無ければ origin の宛先"
+  git -C "$REPO" config branch.feature-x.remote upstream
+  git -C "$REPO" config branch.feature-x.merge refs/heads/feature-x
+  export STUB_GIT_REDIRECT_FROM="https://github.com/other/repo.git"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.remote)" upstream "pr.remote"
+  assert_eq "$(kv pr.repo)" other/repo "pr.repo"
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  assert_has "$STUB_LOG" "gh pr list -R github.com/other/repo --head feature-x"
+}
+
+t_pr_status_dirty_template() {
+  pr_env
+  printf 'more\n' >> "$REPO/app.txt"
+  printf 'x\n' > "$REPO/untracked.txt"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.dirty)" 2 "pr.dirty"
+  assert_eq "$(kv pr.ready)" yes "未コミットの変更は止める理由にしない"
+  assert_eq "$(kv pr.template)" "" "テンプレートが無い"
+  mkdir -p "$REPO/docs"
+  printf 't\n' > "$REPO/pull_request_template.md"
+  printf 't\n' > "$REPO/docs/pull_request_template.md"
+  dr pr status; assert_eq "$(kv pr.template)" docs/pull_request_template.md "docs/ が上のフォルダより先"
+  mkdir -p "$REPO/.github"
+  printf 't\n' > "$REPO/.github/pull_request_template.md"
+  dr pr status; assert_eq "$(kv pr.template)" .github/pull_request_template.md ".github/ が先"
+  assert_eq "$(kv pr.ready)" yes "テンプレートがあっても pr.ready は変わらない"
+}
+
+t_pr_status_push_url() {
+  pr_env
+  git -C "$REPO" config remote.origin.pushurl "https://github.com/other/repo.git"
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" push-url-mismatch "push 先が設定の URL と違う"
+  assert_eq "$(kv pr.ready)" no "pr.ready"
+  git -C "$REPO" config --unset-all remote.origin.pushurl
+  git -C "$REPO" config --add remote.origin.pushurl "https://github.com/stub/repo.git"
+  git -C "$REPO" config --add remote.origin.pushurl "https://github.com/stub/other.git"
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" push-url-mismatch "push 先が2つ"
+  git -C "$REPO" config --unset-all remote.origin.pushurl
+  # insteadOf は、通信のときは bare への書き換え（より長い一致）が優先される。表示の宛先は書き換えたあとの値
+  git -C "$REPO" config url."https://github.com/rewritten/".insteadOf "https://github.com/stub/"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.repo)" rewritten/repo "insteadOf を当てはめたあとの宛先"
+  assert_eq "$(kv pr.ready)" yes "insteadOf: pr.ready"
+  assert_has "$STUB_LOG" "gh repo view github.com/rewritten/repo"
+}
+
+t_pr_status_lookup_failures() {
+  pr_env
+  export STUB_GH_USER_EXIT=1
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" account-unknown "アカウントを取得できない"
+  assert_eq "$(kv pr.ready)" no "account-unknown: pr.ready"
+  unset STUB_GH_USER_EXIT
+  export STUB_GH_REPO_EXIT=1
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" repo-unknown "リポジトリの情報を取得できない"
+  assert_eq "$(kv pr.ready)" no "repo-unknown: pr.ready"
+  dr pr status --base main; assert_rc 0
+  assert_contains "$(kv pr.blockers)" repo-unknown "--base を付けても repo-unknown"
+  assert_eq "$(kv pr.ready)" no "--base を付けても pr.ready=no"
+  unset STUB_GH_REPO_EXIT
+  export STUB_GH_LIST_EXIT=1
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" existing-unknown "既存の PR を照会できない"
+  assert_eq "$(kv pr.ready)" no "existing-unknown: pr.ready"
+  unset STUB_GH_LIST_EXIT
+  rm -rf "$BARE"
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" compare-unknown "fetch が失敗する"
+  assert_eq "$(kv pr.ready)" no "compare-unknown: pr.ready"
+}
+
+t_pr_base_invalid() {
+  local b before bare_before
+  pr_env
+  before="$(git -C "$REPO" for-each-ref)"
+  bare_before="$(git -C "$BARE" for-each-ref)"
+  for b in "main:refs/heads/other" "ma*n" "-x"; do
+    dr pr status --base "$b"; assert_eq "$RC" 1 "pr status --base $b"
+    dr pr create --title "$TITLE" --body-file "$BODY" --base "$b" --dry-run; assert_eq "$RC" 1 "pr create --base $b"
+  done
+  assert_eq "$(grep -c '^git fetch ' "$STUB_LOG" || true)" 0 "git fetch の回数"
+  assert_eq "$(git -C "$REPO" for-each-ref)" "$before" "手元の参照"
+  assert_eq "$(git -C "$BARE" for-each-ref)" "$bare_before" "bare の参照"
+  assert_eq "$(bare_ref other)" "" "bare に別のブランチができていない"
+}
+
+t_pr_status_no_tracking_ref() {
+  pr_env
+  git -C "$REPO" config remote.origin.fetch "+refs/heads/other:refs/remotes/origin/other"
+  git -C "$REPO" update-ref -d refs/remotes/origin/main
+  assert_eq "$(git -C "$REPO" rev-parse -q --verify refs/remotes/origin/main || true)" "" "追跡参照が無い前提"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.ahead)" 1 "pr.ahead"
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+}
+
+t_pr_status_cross_repository() {
+  need_jq || return 0
+  pr_env
+  export STUB_GH_PRS_JSON='[{"url":"https://github.com/stub/repo/pull/7","isCrossRepository":true}]'
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.ready)" yes "フォークからの PR だけなら、既存の PR にしない"
+  assert_eq "$(kv pr.existing)" "" "pr.existing"
+  export STUB_GH_PRS_JSON='[{"url":"https://github.com/stub/repo/pull/7","isCrossRepository":true},{"url":"https://github.com/stub/repo/pull/8","isCrossRepository":false}]'
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" existing-pr "同じリポジトリの PR がある"
+  assert_eq "$(kv pr.existing)" "https://github.com/stub/repo/pull/8" "pr.existing"
+  unset STUB_GH_PRS_JSON
+  export STUB_GH_LIST_COUNT=100
+  dr pr status; assert_rc 0
+  assert_contains "$(kv pr.blockers)" existing-unknown "照会の結果が上限に達していて、見つからない"
+  assert_eq "$(kv pr.ready)" no "上限に達している: pr.ready"
+  export STUB_GH_EXISTING="https://github.com/stub/repo/pull/9"
+  dr pr status; assert_rc 0
+  assert_eq "$(kv pr.blockers)" existing-pr "上限に達していても、見つかれば existing-pr"
+}
+
+t_pr_check_pass() {
+  new_env
+  pr_body > "$T/ok.md"
+  dr pr check "$T/ok.md"; assert_rc 0
+  assert_eq "$(kv check)" pass "check"
+  assert_eq "$(kv check.reason)" "" "check.reason"
+  case "$(kv check.lines)" in 12|14) ;; *) fail "check.lines: 空でない12行（フェンスの行を数えるなら14行）のはず: '$(kv check.lines)'" ;; esac
+  assert_eq "$(kv check.long)" "" "check.long"
+  sed 's/^## Why$/## Why   /' "$T/ok.md" > "$T/trailing.md"
+  dr pr check "$T/trailing.md"; assert_rc 0
+  assert_eq "$(kv check)" pass "見出しの行末の空白は許す"
+}
+
+t_pr_check_structure() {
+  new_env
+  PB_WITHOUT=Scope pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check)" fail "check"
+  assert_eq "$(kv check.reason)" "missing-section:Scope" "節が1つ無い"
+  PB_WITHOUT="Scope;Tradeoffs" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "missing-section:Scope,Tradeoffs" "節が2つ無い"
+  PB_WITHOUT="What changed" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "missing-section:What changed" "名前に空白がある節"
+  PB_SWAP=1 pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" order "順が違う"
+  PB_EMPTY=Tradeoffs pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "empty-section:Tradeoffs" "中身の無い節"
+  PB_NOFENCE=1 pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" no-commands "Verification にフェンスが無い"
+}
+
+t_pr_check_fence_contents() {
+  local fence='```'
+  new_env
+  PB_REPLACE=Verification PB_REPLACE_TEXT="$(printf '%s\n%s' "$fence" "$fence")" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "empty-section:Verification;no-commands" "Verification が中身の無いフェンスだけ"
+  PB_REPLACE=Why PB_REPLACE_TEXT="$(printf '%s\n%s' "$fence" "$fence")" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "empty-section:Why" "Why が中身の無いフェンスだけ"
+  PB_REPLACE=Verification PB_REPLACE_TEXT="$(printf '%s\n\n  \n%s' "$fence" "$fence")" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "empty-section:Verification;no-commands" "中に空白行しか無いフェンスは空と同じ"
+  PB_TAIL="$(printf '%s\nnot closed' "$fence")" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" unclosed-fence "コマンドのフェンスのあとに閉じていないフェンス"
+  PB_WITHOUT="Scope;Tradeoffs" PB_TAIL="$(printf '%s\nnot closed' "$fence")" pr_body > "$T/b.md"
+  dr pr check "$T/b.md" --no-sections; assert_rc 2
+  assert_eq "$(kv check.reason)" unclosed-fence "--no-sections でも閉じていないフェンスは fail"
+  pr_body > "$T/ok.md"
+  dr pr check "$T/ok.md"; assert_rc 0
+  assert_eq "$(kv check)" pass "既存の合格の本文は合格のまま"
+}
+
+t_pr_check_fenced_headings() {
+  new_env
+  PB_WITHOUT=Scope PB_FENCE_LINE="## Scope" pr_body > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "missing-section:Scope" "見出しがフェンスの中にしか無い"
+  pr_body | sed 's/^## Why$/## Why now/' > "$T/b.md"
+  dr pr check "$T/b.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "missing-section:Why" "見出しは行全体が一致する"
+}
+
+check_leak() {
+  local kind="$1" payload="$2" ln
+  PB_EXTRA="memo MARK $payload" pr_body > "$T/leak.md"
+  ln="$(grep -n 'MARK' "$T/leak.md" | head -n 1 | cut -d: -f1)"
+  dr pr check "$T/leak.md"; assert_eq "$RC" 2 "終了コード ($kind)"
+  assert_eq "$(kv check.reason)" "leak:${kind}@${ln}" "本文の漏れ ($kind)"
+  pr_body > "$T/ok.md"
+  dr pr check "$T/ok.md" --title "fix $payload"; assert_eq "$RC" 2 "題の終了コード ($kind)"
+  assert_eq "$(kv check.reason)" "leak:${kind}@title" "題の漏れ ($kind)"
+}
+
+t_pr_check_leaks() {
+  local ln1 ln2
+  new_env
+  check_leak home-path "$LEAK_MAC"
+  check_leak home-path "$LEAK_LINUX"
+  check_leak home-path "$LEAK_WIN"
+  check_leak api-key "$LEAK_SK"
+  check_leak api-key "$LEAK_GH"
+  check_leak api-key "$LEAK_AWS"
+  check_leak private-key "$LEAK_KEY"
+  # フェンスの中も調べる
+  PB_FENCE_LINE="cat $LEAK_MAC/x" pr_body > "$T/leak.md"
+  ln1="$(grep -n "cat " "$T/leak.md" | head -n 1 | cut -d: -f1)"
+  dr pr check "$T/leak.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "leak:home-path@${ln1}" "フェンスの中の漏れ"
+  # 種類ごとに、最初の1行だけ
+  PB_EXTRA="$(printf 'one MARK1 %s\ntwo MARK2 %s' "$LEAK_MAC" "$LEAK_LINUX")" pr_body > "$T/leak.md"
+  ln1="$(grep -n 'MARK1' "$T/leak.md" | cut -d: -f1)"
+  ln2="$(grep -n 'MARK2' "$T/leak.md" | cut -d: -f1)"
+  dr pr check "$T/leak.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" "leak:home-path@${ln1}" "同じ種類は最初の1行だけ"
+  # 種類が違えば、どちらも出る
+  PB_EXTRA="$(printf 'one MARK1 %s\ntwo MARK2 %s' "$LEAK_MAC" "$LEAK_SK")" pr_body > "$T/leak.md"
+  ln2="$(grep -n 'MARK2' "$T/leak.md" | cut -d: -f1)"
+  dr pr check "$T/leak.md"; assert_rc 2
+  assert_contains "$(kv check.reason)" "leak:home-path@$(grep -n 'MARK1' "$T/leak.md" | cut -d: -f1)" "種類が違う漏れ（1つ目）"
+  assert_contains "$(kv check.reason)" "leak:api-key@${ln2}" "種類が違う漏れ（2つ目）"
+}
+
+t_pr_check_no_sections_and_empty() {
+  new_env
+  PB_WITHOUT="Scope;Tradeoffs" pr_body > "$T/b.md"
+  dr pr check "$T/b.md" --no-sections; assert_rc 0
+  assert_eq "$(kv check)" pass "--no-sections なら節が無くても pass"
+  PB_WITHOUT=Scope PB_EXTRA="memo $LEAK_MAC" pr_body > "$T/b.md"
+  dr pr check "$T/b.md" --no-sections; assert_rc 2
+  assert_eq "$(kv check)" fail "--no-sections でも漏れは fail"
+  assert_contains "$(kv check.reason)" "leak:home-path@" "--no-sections の漏れの理由"
+  : > "$T/empty.md"
+  dr pr check "$T/empty.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" empty "空のファイル"
+  dr pr check "$T/empty.md" --no-sections; assert_rc 2
+  assert_eq "$(kv check.reason)" empty "--no-sections の空のファイル"
+  printf '\n\n' > "$T/blank.md"
+  dr pr check "$T/blank.md"; assert_rc 2
+  assert_eq "$(kv check.reason)" empty "空行だけのファイル"
+}
+
+t_pr_check_long_and_missing() {
+  new_env
+  PB_PAD=70 pr_body > "$T/long.md"
+  dr pr check "$T/long.md"; assert_rc 0
+  assert_eq "$(kv check)" pass "長くても pass"
+  assert_eq "$(kv check.long)" yes "check.long"
+  PB_PAD=40 pr_body > "$T/short.md"
+  dr pr check "$T/short.md"; assert_rc 0
+  assert_eq "$(kv check.long)" "" "60 行以内なら check.long を出さない"
+  dr pr check "$T/no-such-file.md"; assert_rc 1
+}
+
+t_pr_create_dry_run() {
+  local want
+  pr_env
+  pr_dry; assert_rc 0
+  assert_eq "$(kv pr.account)" stub-user "pr.account"
+  assert_eq "$(kv pr.repo)" stub/repo "pr.repo"
+  assert_eq "$(kv pr.base)" main "pr.base"
+  assert_eq "$(kv pr.branch)" feature-x "pr.branch"
+  assert_eq "$(kv pr.head)" "$(head_sha)" "pr.head"
+  assert_eq "$(kv pr.ahead)" 1 "pr.ahead"
+  assert_eq "$(kv pr.dirty)" 0 "pr.dirty"
+  assert_eq "$(kv pr.draft)" no "pr.draft"
+  assert_eq "$(kv pr.title)" "$TITLE" "pr.title"
+  assert_eq "$(kv pr.base-sha)" "$(bare_ref main)" "pr.base-sha"
+  assert_key_order pr.account pr.repo pr.base pr.base-sha pr.branch pr.head pr.ahead pr.dirty pr.draft pr.title check.lines pr.confirm
+  printf '%s\n' "$CONFIRM" | grep -Eq '^[0-9a-f]{40}$' || fail "pr.confirm が40文字の16進数ではない: '$CONFIRM'"
+  want="$(printf '%s\n' stub-user stub/repo main feature-x "$(head_sha)" "$(git -C "$REPO" rev-list "$(bare_ref main)..HEAD" | git -C "$REPO" hash-object --stdin)" no no "$TITLE" "$(git -C "$REPO" hash-object "$BODY")" | git -C "$REPO" hash-object --stdin)"
+  assert_eq "$CONFIRM" "$want" "確認の値（4.5 の並びから求めた値）"
+  assert_nothing_sent
+}
+
+t_pr_create_flow() {
+  pr_env
+  export STUB_GH_BODY_COPY="$T/copied.md"
+  pr_dry; assert_rc 0
+  pr_go; assert_rc 0
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/1" "pr.url"
+  assert_eq "$(kv pr.draft)" no "pr.draft"
+  assert_eq "$(bare_ref feature-x)" "$(head_sha)" "bare に届いたブランチの先頭"
+  assert_eq "$(gh_creates)" 1 "gh pr create の回数"
+  assert_has "$STUB_LOG" "gh pr create -R github.com/stub/repo --base main --head feature-x --title Add feature --body-file "
+  assert_lacks "$STUB_LOG" "--draft"
+  assert_has "$STUB_LOG" "git push $GH_STUB_URL $(head_sha):refs/heads/feature-x"
+  assert_lacks "$STUB_LOG" "--force"
+  assert_file "$T/copied.md"
+  cmp -s "$T/copied.md" "$BODY" || fail "偽の gh に写った本文が、渡した本文と違う"
+  assert_eq "$(git -C "$REPO" config branch.feature-x.remote || true)" origin "上流の設定"
+  assert_eq "$(git -C "$REPO" config branch.feature-x.merge || true)" refs/heads/feature-x "上流のブランチ"
+}
+
+t_pr_create_pinned_destination() {
+  local other
+  pr_env
+  other="$T/other.git"
+  pr_dry; assert_rc 0
+  "$STUB_REAL_GIT" init -q --bare "$other"
+  # fetch が終わった直後に pushurl が別の bare に替わる git の差し替え（確認のあと、push の前に設定が変わる場面）
+  rm "$T/bin/git"
+  export TEST_GIT_STUB="$ROOT/tests/stubs/git" TEST_OTHER_BARE="$other" TEST_REPO_DIR="$REPO"
+  cat > "$T/bin/git" <<'EOS'
+#!/bin/bash
+if [ "${1:-}" = fetch ]; then
+  "$TEST_GIT_STUB" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    "$STUB_REAL_GIT" -C "$TEST_REPO_DIR" config remote.origin.pushurl "$TEST_OTHER_BARE"
+  fi
+  exit "$rc"
+fi
+exec "$TEST_GIT_STUB" "$@"
+EOS
+  chmod +x "$T/bin/git"
+  hash -r
+  pr_go; assert_rc 0
+  assert_eq "$("$STUB_REAL_GIT" -C "$other" rev-parse -q --verify refs/heads/feature-x 2>/dev/null || true)" "" "pushurl が替わっても、別の宛先には送らない"
+  assert_eq "$(bare_ref feature-x)" "$(head_sha)" "確かめた宛先に届く"
+}
+
+t_pr_create_draft() {
+  pr_env
+  pr_dry --draft; assert_rc 0
+  assert_eq "$(kv pr.draft)" yes "dry-run の pr.draft"
+  pr_go --draft; assert_rc 0
+  assert_eq "$(kv pr.draft)" yes "pr.draft"
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/1" "pr.url"
+  assert_contains "$(grep '^gh pr create ' "$STUB_LOG")" " --draft" "gh pr create に --draft が渡る"
+  pr_env
+  pr_dry; assert_rc 0
+  pr_go --draft; assert_rc 1
+  assert_eq "$(kv pr.changed)" yes "ドラフトかどうかを変えると確認の値が合わない"
+  assert_nothing_sent
+}
+
+t_pr_create_changed() {
+  local c
+  for c in commit body title bogus; do
+    pr_env
+    pr_dry; assert_eq "$RC" 0 "dry-run の終了コード ($c)"
+    case "$c" in
+      commit) git -C "$REPO" commit -q --allow-empty -m "one more" ;;
+      body)   printf 'one more line\n' >> "$BODY" ;;
+      title)  TITLE="Another title" ;;
+      bogus)  CONFIRM="0000000000000000000000000000000000000000" ;;
+    esac
+    pr_go
+    assert_eq "$RC" 1 "終了コード ($c)"
+    assert_eq "$(kv pr.changed)" yes "pr.changed ($c)"
+    [ -s "$T/err" ] || fail "標準エラーに説明が無い ($c)"
+    assert_nothing_sent
+  done
+  # ベースに、自分のコミットの一部が入った（PR に入るコミットが変わる）
+  pr_env
+  git -C "$REPO" commit -q --allow-empty -m "second"
+  pr_dry; assert_rc 0
+  "$STUB_REAL_GIT" -C "$REPO" push -q "$BARE" "$(git -C "$REPO" rev-parse HEAD~1):refs/heads/main"
+  pr_go; assert_eq "$RC" 1 "ベースに自分のコミットの一部が入った: 終了コード"
+  assert_eq "$(kv pr.changed)" yes "ベースに自分のコミットの一部が入った: pr.changed"
+  assert_nothing_sent
+  # ベースに無関係なコミットが足されただけなら、同じ値で作れる
+  pr_env
+  pr_dry; assert_rc 0
+  "$STUB_REAL_GIT" clone -q "$BARE" "$T/other"
+  (
+    cd "$T/other" || exit 1
+    "$STUB_REAL_GIT" config user.name tester
+    "$STUB_REAL_GIT" config user.email "$NOREPLY"
+    "$STUB_REAL_GIT" config commit.gpgsign false
+    printf 'unrelated\n' > unrelated.txt
+    "$STUB_REAL_GIT" add unrelated.txt
+    "$STUB_REAL_GIT" commit -qm "unrelated"
+    "$STUB_REAL_GIT" push -q origin main
+  ) || fail "ベースに無関係なコミットを足せなかった"
+  pr_go; assert_rc 0
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/1" "ベースが進んだだけなら作れる"
+  pr_env
+  dr pr create --title "$TITLE" --body-file "$BODY"; assert_rc 1
+  dr pr create --title "$TITLE" --body-file "$BODY" --dry-run --confirm "0000000000000000000000000000000000000000"; assert_rc 1
+  assert_nothing_sent
+}
+
+t_pr_create_blocked() {
+  local c want
+  for c in permission base existing account unknown; do
+    pr_env
+    case "$c" in
+      permission) want=permission-unset; git -C "$REPO" config --unset dev-relay.pr ;;
+      base)       want=on-base; git -C "$REPO" checkout -q main ;;
+      existing)   want=existing-pr; export STUB_GH_EXISTING="https://github.com/stub/repo/pull/12" ;;
+      account)    want=account-unknown; export STUB_GH_USER_EXIT=1 ;;
+      unknown)    want=existing-unknown; export STUB_GH_LIST_EXIT=1 ;;
+    esac
+    dr pr create --title "$TITLE" --body-file "$BODY" --dry-run
+    assert_eq "$RC" 1 "dry-run の終了コード ($c)"
+    assert_contains "$(kv pr.blockers)" "$want" "pr.blockers ($c)"
+    [ -s "$T/err" ] || fail "標準エラーに説明が無い ($c)"
+    dr pr create --title "$TITLE" --body-file "$BODY" --confirm "0000000000000000000000000000000000000000"
+    assert_eq "$RC" 1 "confirm の終了コード ($c)"
+    assert_contains "$(kv pr.blockers)" "$want" "confirm の pr.blockers ($c)"
+    assert_nothing_sent
+  done
+}
+
+t_pr_create_body_checked() {
+  pr_env
+  PB_WITHOUT=Scope pr_body > "$BODY"
+  dr pr create --title "$TITLE" --body-file "$BODY" --dry-run; assert_rc 1
+  assert_eq "$(kv check.reason)" "missing-section:Scope" "本文が不合格"
+  assert_eq "$(kv pr.confirm)" "" "不合格なら確認の値を出さない"
+  dr pr create --title "$TITLE" --body-file "$BODY" --confirm "0000000000000000000000000000000000000000"; assert_rc 1
+  assert_eq "$(kv check.reason)" "missing-section:Scope" "--confirm でも本文を調べる"
+  assert_nothing_sent
+  pr_body > "$BODY"
+  TITLE="Fix $LEAK_MAC"
+  dr pr create --title "$TITLE" --body-file "$BODY" --dry-run; assert_rc 1
+  assert_eq "$(kv check.reason)" "leak:home-path@title" "題に漏れの形がある"
+  assert_nothing_sent
+  TITLE="Add feature"
+  PB_WITHOUT=Scope pr_body > "$BODY"
+  pr_dry --no-sections; assert_rc 0
+  pr_go --no-sections; assert_rc 0
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/1" "--no-sections なら節が無くても作れる"
+}
+
+t_pr_create_bad_args() {
+  local t101 t100
+  pr_env
+  t101="$(printf '%101s' '' | tr ' ' a)"
+  t100="$(printf '%100s' '' | tr ' ' a)"
+  dr pr create --title "" --body-file "$BODY" --dry-run; assert_eq "$RC" 1 "題が空"
+  dr pr create --title "$(printf 'one\ntwo')" --body-file "$BODY" --dry-run; assert_eq "$RC" 1 "題が複数行"
+  dr pr create --title "$t101" --body-file "$BODY" --dry-run; assert_eq "$RC" 1 "題が101文字"
+  dr pr create --title "$TITLE" --body-file "$T/no-such-file.md" --dry-run; assert_eq "$RC" 1 "本文のファイルが無い"
+  dr pr create --title "$TITLE" --dry-run; assert_eq "$RC" 1 "--body-file が無い"
+  dr pr create --body-file "$BODY" --dry-run; assert_eq "$RC" 1 "--title が無い"
+  assert_nothing_sent
+  dr pr create --title "$t100" --body-file "$BODY" --dry-run; assert_eq "$RC" 0 "題が100文字"
+}
+
+t_pr_create_push_rejected() {
+  local other before
+  pr_env
+  pr_dry; assert_rc 0
+  other="$T/other"
+  "$STUB_REAL_GIT" clone -q "$BARE" "$other"
+  (
+    cd "$other" || exit 1
+    "$STUB_REAL_GIT" config user.name tester
+    "$STUB_REAL_GIT" config user.email "$NOREPLY"
+    "$STUB_REAL_GIT" config commit.gpgsign false
+    "$STUB_REAL_GIT" checkout -q -b feature-x origin/main
+    printf 'other\n' > other.txt
+    "$STUB_REAL_GIT" add other.txt
+    "$STUB_REAL_GIT" commit -qm "other work"
+    "$STUB_REAL_GIT" push -q origin feature-x
+  ) || fail "別の作業のコミットを bare に足せなかった"
+  before="$(bare_ref feature-x)"
+  [ -n "$before" ] || fail "bare にブランチが無い"
+  pr_go; assert_rc 10
+  assert_eq "$(gh_creates)" 0 "gh pr create の回数"
+  assert_eq "$(bare_ref feature-x)" "$before" "リモートのブランチは書き換わらない"
+  [ -s "$T/err" ] || fail "標準エラーに理由が無い"
+}
+
+t_pr_create_gh_failure() {
+  pr_env
+  export STUB_GH_CREATE_EXIT=1
+  pr_dry; assert_rc 0
+  pr_go; assert_rc 10
+  assert_eq "$(kv pr.result)" unknown "pr.result"
+  assert_contains "$(cat "$T/err")" "push 済み" "標準エラー"
+  assert_eq "$(bare_ref feature-x)" "$(head_sha)" "ブランチは push 済み"
+  assert_eq "$(kv pr.url)" "" "pr.url"
+  assert_eq "$(kv pr.existing)" "" "pr.existing"
+}
+
+t_pr_create_lost_response() {
+  pr_env
+  export STUB_GH_CREATED_ANYWAY=1 STUB_GH_CREATE_EXIT=1 STUB_GH_STATE="$T/gh-state" STUB_GH_URL="https://github.com/stub/repo/pull/5"
+  pr_dry; assert_rc 0
+  pr_go; assert_rc 10
+  assert_eq "$(kv pr.result)" unknown "pr.result"
+  assert_eq "$(kv pr.existing)" "https://github.com/stub/repo/pull/5" "照会で見つけた URL"
+  assert_eq "$(kv pr.url)" "" "成功としては終わらない"
+}
+
+t_pr_create_token_pinned() {
+  pr_env
+  printf 'first-token\n' > "$T/token"
+  export STUB_GH_TOKEN_FILE="$T/token" STUB_GH_TOKEN_SEEN="$T/seen" STUB_GIT_SWITCH_TOKEN="other-token"
+  pr_dry; assert_rc 0
+  cp "$T/out" "$T/out.dry"; cp "$T/err" "$T/err.dry"
+  pr_go; assert_rc 0
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/1" "pr.url"
+  assert_eq "$(cat "$T/token")" other-token "push の間にアカウントが切り替わった前提"
+  assert_eq "$(cat "$T/seen")" first-token "gh pr create に渡るトークンは、最初に取ったもの"
+  local f tok
+  for f in "$T/out" "$T/err" "$T/out.dry" "$T/err.dry" "$STUB_LOG"; do
+    for tok in first-token other-token; do
+      assert_lacks "$f" "$tok"
+    done
+  done
+}
+
+t_pr_recent() {
+  pr_env
+  export STUB_GH_TITLES="$(printf 'Fix bug\nAdd login')"
+  dr pr recent; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$(printf 'pr: Fix bug\npr: Add login')" "PR の題"
+  assert_has "$STUB_LOG" "gh pr list -R github.com/stub/repo --state all --limit 5 --json title -q"
+  unset STUB_GH_TITLES
+  dr pr recent; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$(printf 'commit: add feature\ncommit: init')" "PR が無ければコミットの題"
+  rm "$T/bin/gh"
+  dr pr recent; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$(printf 'commit: add feature\ncommit: init')" "gh が無くてもコミットの題が出る"
+}
+
+t_pr_output_backslashes() {
+  pr_env
+  # xpg_echo が有効な bash でも、題のバックスラッシュがそのまま出る
+  printf '%s\n' 'shopt -s xpg_echo' > "$T/xpg.sh"
+  export BASH_ENV="$T/xpg.sh"
+  TITLE='Fix a\nb\tc'
+  pr_dry; assert_rc 0
+  assert_eq "$(grep -c '^pr.title=' "$T/out")" 1 "pr.title の行数"
+  assert_eq "$(kv pr.title)" 'Fix a\nb\tc' "pr create --dry-run の pr.title"
+  export STUB_GH_TITLES='Add d\ne\tf'
+  dr pr recent; assert_rc 0
+  assert_eq "$(cat "$T/out")" 'pr: Add d\ne\tf' "pr recent の pr: の行"
+  unset STUB_GH_TITLES
+  git -C "$REPO" commit -q --allow-empty -m 'Fix g\nh\ti'
+  dr pr recent; assert_rc 0
+  assert_eq "$(head -n 1 "$T/out")" 'commit: Fix g\nh\ti' "pr recent の commit: の行"
+  assert_eq "$(wc -l < "$T/out" | tr -d ' ')" 3 "pr recent の行数"
+}
+
+t_pr_draft_path() {
+  pr_env
+  git -C "$REPO" checkout -q -b feature/foo
+  dr pr draft-path; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-feature-foo.md" "下書きのパス"
+  [ -d "$REPO/.dev-relay" ] || fail ".dev-relay フォルダができていない"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
+  git -C "$REPO" checkout -q -b "fix/a#b"
+  dr pr draft-path; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-fix-a-b.md" "英数字と . _ - 以外は - に置き換える"
+  git -C "$REPO" checkout -q --detach
+  dr pr draft-path; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-detached.md" "ブランチ名が取れないとき"
+  mkdir "$T/outside"
+  dr_in "$T/outside" pr draft-path; assert_rc 1
+}
+
+t_timeout_kills_group() {
+  new_env
+  without_timeout_tools
+  cat > "$T/child.sh" <<'EOS'
+#!/bin/bash
+cat > "$1.stdin"
+( sleep 3; echo late > "$1" ) &
+sleep 30
+EOS
+  RC=0
+  ( . "$ROOT/scripts/lib/common.sh"; printf 'hello' | run_with_timeout 1 bash "$T/child.sh" "$T/late" ) > "$T/out" 2> "$T/err" || RC=$?
+  assert_rc 124
+  sleep 5
+  [ ! -e "$T/late" ] || fail "期限のあとも、孫プロセスが動き続けた"
+  assert_eq "$(cat "$T/late.stdin" 2>/dev/null)" hello "標準入力が子に渡る"
+}
+
+t_pr_unknown_subcommand() {
+  new_env
+  dr pr no-such-subcommand; assert_rc 1
+  [ -s "$T/err" ] || fail "使い方が標準エラーに出ていない"
+  dr pr --help; assert_rc 0
+  dr pr -h; assert_rc 0
+}
+
 # ---- 実行 -------------------------------------------------------------------
 
 run_test() {
@@ -1893,6 +2889,51 @@ run_test "83 smoke: DEV_RELAY_TIMEOUT が不正なら 1" t_smoke_bad_timeout
 run_test "84 refresh notice --hook: --version が TERM を無視しても、perl の経路でも9秒以内に、何も出さず 0 で戻る" t_hook_returns_when_version_ignores_term
 run_test "85 refresh notice: 見直しの日付が2件過ぎていると、括弧の中に ほか1件 を付ける" t_notice_two_review_dates
 run_test "86 smoke: Cursor が題材の無視されるファイル（__pycache__）を作っても pass" t_smoke_cursor_ignored_file
+
+run_test "87 config pr: 既定は unset、--repo on / off で書け、--reset で戻る。不正な値と --repo の無い書き込みは 1" t_config_pr
+run_test "88 doctor: tool.gh（not-installed / ok / not-logged-in）と tool.gh.version と repo.pr が出て、gh auth token に --hostname と --no-refresh が渡る" t_doctor_gh
+run_test "87a config pr: 値が複数あっても --repo --reset で unset に戻り、--repo on で1つの値になる。設定が無くても --reset は 0" t_config_pr_multiple_values
+run_test "88a pr status: dev-relay.pr が on / off 以外の値、または複数の値なら、off として扱い、warning: を出す" t_pr_permission_values
+run_test "89 pr status: 許可済みで、ブランチにコミットがあり PR が無ければ pr.ready=yes と、宛先・ベースとその SHA・先頭・差・アカウントが出て、参照が残らない" t_pr_status_ready
+run_test "89a pr status: gh に渡すリポジトリは、GH_HOST があっても、どの呼び出しでも github.com/OWNER/REPO" t_pr_status_gh_host
+run_test "90 pr status: 許可を尋ねていなければ permission-unset、off なら not-allowed" t_pr_status_permission
+run_test "90a pr status / pr recent: 許可が無ければ（未確認でも off でも）GitHub に照会せず、fetch もしない" t_pr_status_no_lookup_without_permission
+run_test "91 pr status: gh が無ければ gh-not-installed、未ログインなら gh-not-logged-in で、gh はログインの確認しか呼ばれない" t_pr_status_gh_unavailable
+run_test "92 pr status: ベースの上は on-base、コミットが無ければ（コミットが1つも無いリポジトリでも）no-commits、開いている PR があれば existing-pr、フォークなら fork" t_pr_status_states
+run_test "92a pr status: 既定のブランチが無い（defaultBranchRef が null）と repo-unknown で、fetch しない" t_pr_status_no_default_branch
+run_test "93 pr status: リモートが無い、手元のパス、github.com 以外のホスト、git リポジトリの外は、それぞれの理由で止まる" t_pr_status_remote_problems
+run_test "94 pr status: リモートの URL の4つの形が、どれも pr.repo=o/r になる" t_pr_status_url_forms
+run_test "95 pr status: リモートが2つで、ブランチの上流が origin でないほうなら、そのリモートの宛先になる" t_pr_status_two_remotes
+run_test "96 pr status: 未コミットの変更は pr.dirty に出て止めず、テンプレートは決まった順で pr.template に出る" t_pr_status_dirty_template
+run_test "97 pr status: push 先が設定の URL と違うか2つあれば push-url-mismatch、insteadOf は書き換えたあとの宛先になる" t_pr_status_push_url
+run_test "98 pr status: アカウント、リポジトリの情報、既存の PR、fetch の取得に失敗すると、それぞれの *-unknown で pr.ready=no" t_pr_status_lookup_failures
+run_test "98a --base に、参照の指定として働く値（main:refs/heads/other、ma*n、-x）を渡すと 1 で、fetch せず、参照が変わらない" t_pr_base_invalid
+run_test "99 pr status: 追跡参照が無くても、差を数えられる" t_pr_status_no_tracking_ref
+run_test "100 pr status: フォークの同じ名前のブランチから来た PR は既存の PR に数えず、同じリポジトリの PR は数える。照会が上限に達していて見つからなければ existing-unknown" t_pr_status_cross_repository
+run_test "101 pr check: 形式どおりの本文は pass で終了コード 0。見出しの行末の空白は許す" t_pr_check_pass
+run_test "102 pr check: 節の欠け、順の違い、中身の無い節、Verification のフェンスの欠けは、それぞれの理由で終了コード 2" t_pr_check_structure
+run_test "102a pr check: 中身の無いフェンスは数えず、閉じていないフェンスは unclosed-fence（--no-sections でも）" t_pr_check_fence_contents
+run_test "103 pr check: フェンスの中の見出しは数えず、見出しは行全体が一致したものだけを数える" t_pr_check_fenced_headings
+run_test "104 pr check: 手元のパス、API キー、秘密鍵の形は leak:<種類>@<行>、題なら @title。種類ごとに最初の1行だけ、フェンスの中も調べる" t_pr_check_leaks
+run_test "105 pr check --no-sections: 節が無くても pass、漏れは fail、空のファイルは empty" t_pr_check_no_sections_and_empty
+run_test "106 pr check: 60行を超えると check.long=yes で pass のまま。無いファイルは 1" t_pr_check_long_and_missing
+run_test "107 pr create --dry-run: 確認の値（40文字）と宛先を出し、push も gh pr create もしない" t_pr_create_dry_run
+run_test "108 pr create --confirm: dry-run の値で、push して PR を作り、URL を返す。本文は検査した写しが渡る" t_pr_create_flow
+run_test "108a pr create --confirm: 確認のあとで pushurl が替わっても、確かめた宛先に送る" t_pr_create_pinned_destination
+run_test "109 pr create --draft: --draft が渡って pr.draft=yes。draft の有無を変えると確認の値が合わず 1" t_pr_create_draft
+run_test "110 pr create --confirm: コミット、本文、題が変わったか、ベースに自分のコミットの一部が入ったか、値がでたらめなら 1 と pr.changed=yes で、何も送らない。--dry-run と --confirm の過不足も 1。ベースが進んだだけなら作れる" t_pr_create_changed
+run_test "111 pr create: 止める理由（許可、ベース、既存の PR、取得の失敗）があれば 1 で、何も送らない" t_pr_create_blocked
+run_test "112 pr create: 本文か題が不合格なら 1 で何も送らず、--no-sections なら節が無くても作れる" t_pr_create_body_checked
+run_test "113 pr create: 題が空、複数行、101文字、本文のファイルが無い、引数が足りないは 1" t_pr_create_bad_args
+run_test "114 pr create: push が拒まれると 10 で、gh pr create を呼ばず、リモートのブランチを書き換えない" t_pr_create_push_rejected
+run_test "115 pr create: gh pr create が失敗すると 10 と pr.result=unknown で、push 済みと伝える" t_pr_create_gh_failure
+run_test "116 pr create: gh pr create が失敗し PR が作られていても 10 と pr.result=unknown で、pr.existing に URL を出す" t_pr_create_lost_response
+run_test "116a pr create: push の間にアカウントが切り替わっても、gh pr create には最初に取ったトークンが渡り、トークンはどこにも出ない" t_pr_create_token_pinned
+run_test "117 pr recent: PR の題が pr: で、無ければコミットの題が commit: で並ぶ。gh が無くても 0" t_pr_recent
+run_test "117a pr create --dry-run / pr recent: xpg_echo が有効でも、題のバックスラッシュがそのまま出る" t_pr_output_backslashes
+run_test "118 pr draft-path: ブランチ名を - に直した下書きのパスを出し、フォルダを作り、git status に出さない。git リポジトリの外は 1" t_pr_draft_path
+run_test "119 pr: 知らないサブコマンドは 1、--help と -h は 0" t_pr_unknown_subcommand
+run_test "120 run_with_timeout（perl の経路）: 期限のあと孫プロセスも止まり、標準入力は子に渡る" t_timeout_kills_group
 
 echo "# ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]

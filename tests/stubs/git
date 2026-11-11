@@ -1,0 +1,24 @@
+#!/bin/bash
+# tests/run.sh 用の git の差し替え。リモートの URL は GitHub の形のまま、実際の通信だけを手元の bare リポジトリに向ける。
+# 最初の引数が push か fetch で、STUB_GIT_REDIRECT_TO があるときだけ、本物の git に
+#   -c url.<STUB_GIT_REDIRECT_TO>.insteadOf=<STUB_GIT_REDIRECT_FROM>
+# を足して呼ぶ。それ以外は、本物の git をそのまま呼ぶ。
+# 環境変数: STUB_REAL_GIT(本物の git のパス。差し替えを PATH の先頭に置く前に調べておく),
+#           STUB_GIT_REDIRECT_TO, STUB_GIT_REDIRECT_FROM, STUB_LOG(push と fetch の呼び出しを「git <引数...>」で残す),
+#           STUB_GIT_SWITCH_TOKEN(push のとき、先にこの値を STUB_GH_TOKEN_FILE に書く。push の間に有効なアカウントが切り替わった場面を作る)
+if [ -z "${STUB_REAL_GIT:-}" ] || [ "$STUB_REAL_GIT" = "$0" ]; then
+  echo "stub git: STUB_REAL_GIT が本物の git を指していない" >&2
+  exit 2
+fi
+
+case "${1:-}" in
+  push|fetch)
+    echo "git $*" >> "${STUB_LOG:-/dev/null}"
+    if [ "$1" = push ] && [ -n "${STUB_GIT_SWITCH_TOKEN:-}" ] && [ -n "${STUB_GH_TOKEN_FILE:-}" ]; then
+      printf '%s\n' "$STUB_GIT_SWITCH_TOKEN" > "$STUB_GH_TOKEN_FILE"
+    fi
+    if [ -n "${STUB_GIT_REDIRECT_TO:-}" ]; then
+      exec "$STUB_REAL_GIT" -c "url.${STUB_GIT_REDIRECT_TO}.insteadOf=${STUB_GIT_REDIRECT_FROM:-}" "$@"
+    fi ;;
+esac
+exec "$STUB_REAL_GIT" "$@"

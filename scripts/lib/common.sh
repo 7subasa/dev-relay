@@ -81,14 +81,15 @@ run_with_timeout() {
       my $sec = shift;
       my $pid = fork;
       exit 127 unless defined $pid;
-      if ($pid == 0) { exec @ARGV; exit 127; }
-      $SIG{ALRM} = sub {
-        kill "TERM", $pid;
-        for (1 .. 10) { exit 124 if waitpid($pid, WNOHANG) > 0; select(undef, undef, undef, 0.1); }
-        kill "KILL", $pid;
+      if ($pid == 0) { setpgrp(0, 0); exec @ARGV; exit 127; }
+      my $stop = sub {
+        kill "TERM", -$pid;
+        for (1 .. 10) { last if waitpid($pid, WNOHANG) > 0; select(undef, undef, undef, 0.1); }
+        kill "KILL", -$pid;
         waitpid($pid, 0);
-        exit 124;
       };
+      $SIG{ALRM} = sub { $stop->(); exit 124; };
+      $SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub { $stop->(); exit 143; };
       alarm $sec;
       waitpid($pid, 0);
       exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);

@@ -8,6 +8,9 @@
 #   dev-relay config vendors --user <一覧|none|ask>    利用者の既定を書く
 #   dev-relay config vendors --repo <一覧|none>        このリポジトリの設定を書く
 #   dev-relay config vendors --repo --reset           このリポジトリの設定を消す
+#   dev-relay config pr                               このリポジトリで PR 機能を使ってよいかを pr=<on|off|unset> で表示
+#   dev-relay config pr --repo <on|off>               このリポジトリの設定を書く
+#   dev-relay config pr --repo --reset                このリポジトリの設定を消す（まだ尋ねていない状態に戻る）
 #   dev-relay config role <役割>                      役割の候補のファイルと、上書きの有無を表示
 #   dev-relay config role <役割> --from <ファイル>     役割の候補を、このファイルで上書きする
 #   dev-relay config role <役割> --keep               既定値が変わったあとも、上書きを続ける
@@ -15,14 +18,15 @@
 #
 # 一覧は提供元の小文字の名前をカンマで区切ったもの（例: openai,cursor,google）。
 # 設定は設定フォルダ（DEV_RELAY_CONFIG_DIR、既定は ~/.config/dev-relay）に、
-# リポジトリごとの設定は git のローカル設定 dev-relay.vendors に書く。
+# リポジトリごとの設定は git のローカル設定 dev-relay.vendors と dev-relay.pr に書く。
 # 役割の上書きは設定フォルダの roles/<役割>.conf（形式は config/roles/*.conf と同じ）。
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/resolve.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/gh.sh"
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
 
 config_metered() {
   if [ $# -eq 0 ]; then
@@ -177,12 +181,56 @@ config_vendors() {
   echo "${scope}.vendors=${value}"
 }
 
+config_pr() {
+  local scope="" value="" have_value=0 reset=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) scope="repo"; shift ;;
+      --reset) reset=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *)
+        [ "$have_value" -eq 0 ] || die "値は1つだけ指定してください"
+        value="$1"; have_value=1; shift ;;
+    esac
+  done
+
+  if [ -z "$scope" ]; then
+    [ "$have_value" -eq 0 ] && [ "$reset" -eq 0 ] || die "書き込みには --repo が必要です"
+    echo "pr=$(pr_allowed_get)"
+    return 0
+  fi
+
+  in_git_repo || die "git リポジトリの外ではリポジトリごとの設定を書けません"
+  if [ "$reset" -eq 1 ]; then
+    [ "$have_value" -eq 0 ] || die "--reset と値は同時に指定できません"
+    # 値が複数あっても全部消す。終了コード 5 は、もともと無かった場合
+    local rc=0
+    git config --local --unset-all dev-relay.pr 2>/dev/null || rc=$?
+    case "$rc" in
+      0|5) ;;
+      *) die "dev-relay.pr を消せませんでした（git config の終了コード: $rc）" ;;
+    esac
+    echo "このリポジトリの設定を消しました"
+    return 0
+  fi
+
+  [ "$have_value" -eq 1 ] || die "値が必要です（on か off）"
+  case "$value" in
+    on|off) ;;
+    *) die "pr は on か off です: $value" ;;
+  esac
+  # 値が複数あっても、1つの値に置き換える
+  git config --local --replace-all dev-relay.pr "$value"
+  echo "repo.pr=${value}"
+}
+
 SUB="${1:-}"
 case "$SUB" in
   metered) shift; config_metered "$@" ;;
   notice) shift; config_notice "$@" ;;
   role) shift; config_role "$@" ;;
   vendors) shift; config_vendors "$@" ;;
+  pr) shift; config_pr "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 1 ;;
 esac
