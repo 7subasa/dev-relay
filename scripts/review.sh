@@ -17,7 +17,7 @@
 #   --exclude   --extra と一緒にだけ使う。通常のレビューで実際に使った id を渡す。
 #   --reviewer  その役割の候補のうち、この id だけを見る。metered や送り先の許可は越えられない。
 #   --model, --effort  Codex のときだけ、この実行に限って置き換える。
-#   --out       結果ファイル。省略時は .dev-relay/<code|design>-review-<日時>-<id>-<PID>.md。絶対パス推奨。
+#   --out       結果ファイル。省略時は .dev-relay/review/<code|design>-<日時>-<id>-<PID>.md。絶対パス推奨。
 #               git の作業ツリーの中なら、git に無視される場所でなければならない。
 #   --dry-run   レビュアーを決めず、どの CLI も呼ばずに、送る予定の依頼文を標準出力に出して終わる。
 #
@@ -251,7 +251,11 @@ if [ -n "$MODEL" ] || [ -n "$EFFORT" ]; then
 fi
 
 # ---- 7. 結果ファイルのパス --------------------------------------------------
-[ -n "$OUT" ] || OUT="$OUT_DIR/${KIND}-review-$(timestamp)-${R_ID}-$$.md"
+if [ -z "$OUT" ]; then
+  # 既定の置き場所の各段がリンクなら、リンク先に書いてしまうので止める
+  refuse_symlink "$OUT_DIR" "$OUT_DIR/review"
+  OUT="$OUT_DIR/review/${KIND}-$(timestamp)-${R_ID}-$$.md"
+fi
 case "$OUT" in /*) ;; *) OUT="$(pwd)/$OUT" ;; esac
 PROMPT_OUT="${OUT%.md}.prompt.md"
 [ ! -d "$OUT" ] || die "--out にディレクトリは指定できません。ファイルのパスを渡してください: $OUT"

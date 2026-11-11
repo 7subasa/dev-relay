@@ -213,15 +213,11 @@ pr_recent() {
 }
 
 pr_draft_path() {
-  local root branch name
   [ $# -eq 0 ] || die "draft-path は引数を取りません: $1"
   in_git_repo || die "git リポジトリの外では下書きのパスを決められません"
-  root="$(git rev-parse --show-toplevel)"
   pr_branch
-  branch="${P_BRANCH:-detached}"
-  name="$(printf '%s' "$branch" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/-/g')"
-  ensure_out_dir "$root/.dev-relay"
-  echo "$root/.dev-relay/pr-${name}.md"
+  ensure_pr_dir "$(git rev-parse --show-toplevel)"
+  echo "$PR_DIR/body.md"
 }
 
 # ---- 本文の検査（check と create が同じものを使う） ---------------------------

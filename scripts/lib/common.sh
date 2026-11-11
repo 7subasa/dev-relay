@@ -22,15 +22,42 @@ abs_path() {
   printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"
 }
 
+# シンボリックリンクに書くと、リンク先（作業ファイルなど）を上書きしてしまう。引数: パス（複数可）
+refuse_symlink() {
+  local f
+  for f in "$@"; do
+    [ ! -L "$f" ] || die "シンボリックリンクには書き込めません: $f"
+  done
+}
+
 # 結果ファイルを置くフォルダを作る。
-# フォルダ名が .dev-relay で .gitignore が無ければ、結果を誤ってコミットしないよう
-# 中身が * の .gitignore を作る（.gitignore 自身も無視され、git status に現れない）
+# そのフォルダから上へたどって、名前が .dev-relay の最初のフォルダに .gitignore が無ければ、
+# 結果を誤ってコミットしないよう中身が * の .gitignore を作る（.gitignore 自身も無視され、git status に現れない）
 ensure_out_dir() {
-  local dir="$1"
+  local dir="$1" d
   mkdir -p "$dir"
-  if [ "$(basename "$dir")" = ".dev-relay" ] && [ ! -f "$dir/.gitignore" ]; then
-    printf '*\n' > "$dir/.gitignore"
-  fi
+  d="$(cd "$dir" && pwd)"
+  while [ "$d" != "/" ]; do
+    if [ "$(basename "$d")" = ".dev-relay" ]; then
+      if [ ! -f "$d/.gitignore" ]; then printf '*\n' > "$d/.gitignore"; fi
+      return 0
+    fi
+    d="$(dirname "$d")"
+  done
+}
+
+# PR のフォルダ（<root>/.dev-relay/pr/<ブランチ名を直した名前>）を検査して作り、パスを PR_DIR に入れる。
+# 呼ぶ前に P_BRANCH を設定しておく（取れなければ detached）。
+# 引数: 作業ツリーの最上位 [PR のフォルダの下の書く先...]
+# .dev-relay、pr、PR のフォルダ、書く先のどれかがシンボリックリンクなら、何も作らずに止める。
+ensure_pr_dir() {
+  local root="$1" name t
+  shift
+  name="$(printf '%s' "${P_BRANCH:-detached}" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/-/g')"
+  PR_DIR="$root/$OUT_DIR/pr/$name"
+  refuse_symlink "$root/$OUT_DIR" "$root/$OUT_DIR/pr" "$PR_DIR"
+  for t in "$@"; do refuse_symlink "$PR_DIR/$t"; done
+  ensure_out_dir "$PR_DIR"
 }
 
 timestamp() { date +%Y%m%d-%H%M%S; }

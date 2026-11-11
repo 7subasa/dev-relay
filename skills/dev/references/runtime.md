@@ -23,9 +23,9 @@ git status --porcelain | head -20
 
 ## 2. レビューの起動
 
-どの環境でも、結果ファイルのパスは起動する側が `--out` で先に決める。終わったらそのファイルを読めばよく、端末の出力からパスを拾う必要がない。`<topic>` は英小文字・数字・ハイフンの短い名前にする。
+どの環境でも、結果ファイルのパスは起動する側が `--out` で先に決める。終わったらそのファイルを読めばよく、端末の出力からパスを拾う必要がない。`<topic>` は `dev-relay work dir` に渡した名前、`<work.review>` はその出力の値（絶対パス）。
 
-結果ファイルは `.dev-relay/` か、作業ツリーの外に置く（git に無視される場所でなければ、終了コード 1 になる）。
+結果ファイルは `<work.review>/` に置く。ほかの場所なら、git に無視される場所か作業ツリーの外でなければ、終了コード 1 になる。
 
 スクリプトは最長15分待つ。Bash ツールの前景実行は最大10分で打ち切られるので、前景では実行しない。
 
@@ -36,7 +36,7 @@ git status --porcelain | head -20
 ```bash
 hc run --bg --rm --no-notify --name rv-code-<topic> --cwd <リポジトリの絶対パス> -- \
   "$(command -v dev-relay)" review code --design <設計書の絶対パス> \
-  --out <リポジトリの絶対パス>/.dev-relay/code-review-<topic>-1.md
+  --out <work.review>/code-1.md
 
 # 起動したら、待たずに自分の確認作業（テストの再実行、差分を読む）を進める。
 # 確認作業が終わってから、レビューの完了を待つ:
@@ -48,8 +48,8 @@ hc wait rv-code-<topic> --timeout 540
 - `hc wait` は JSON を返す。`"reason":"timeout"` なら、まだ実行中という意味。もう一度同じコマンドで待つ。`sleep` で待ったり、同じレビューをもう1本起動したりしない。
 - `"reason":"exit"` で `"exit_code":0` なら完了。`--out` に指定したファイルを読む。`exit_code` が 0 以外なら、`troubleshooting.md` の終了コードの表を見る。3 は失敗ではなく、選ばれたレビュアーが `claude` という意味（下の「終了コード 3 が返ったとき」）。`--rm` を付けているので、端末は終了後に自動で片付く。
 - `hc run` も JSON を返す。その中の `address`（`t24` など）が端末アドレス。
-- 設計レビューは名前を `rv-design-<topic>` にし、`"$(command -v dev-relay)"` `review design <設計書の絶対パス> --out ...` を同じ形で起動する。
-- 名前は生きている端末の中で一意でなければならない。再レビューでは `rv-code-<topic>-2` のように変える。
+- 設計レビューは名前を `rv-design-<topic>` にし、`"$(command -v dev-relay)"` `review design <設計書の絶対パス> --out <work.review>/design-1.md` を同じ形で起動する。
+- 名前は生きている端末の中で一意でなければならない。再レビューでは `rv-code-<topic>-2` のように変え、結果も `code-2.md` にする。
 - ユーザーは Herdr の画面で、端末アドレス（`t12` など）を Cmd+クリック（macOS 以外は Ctrl+クリック）すると途中経過を見られる。起動したら、名前とアドレスを一言伝える。
 - `hc` の詳しい使い方は `hc --skill` で読める。ユーザーの core を止める・再起動する操作（`hc server stop` など）はしない。
 
@@ -61,7 +61,7 @@ hc wait rv-code-<topic> --timeout 540
 hc run --bg --rm --no-notify --name rv-code-<topic>-extra --cwd <リポジトリの絶対パス> -- \
   "$(command -v dev-relay)" review code --design <設計書の絶対パス> \
   --extra --exclude <通常のレビューで使う id> \
-  --out <リポジトリの絶対パス>/.dev-relay/code-review-<topic>-1-extra.md
+  --out <work.review>/code-1-extra.md
 
 hc wait rv-code-<topic>-extra --timeout 540
 ```
@@ -76,7 +76,7 @@ Bash ツールを `run_in_background: true` で呼び、完了の通知を待つ
 
 ```bash
 dev-relay review code --design <設計書の絶対パス> \
-  --out <リポジトリの絶対パス>/.dev-relay/code-review-<topic>-1.md
+  --out <work.review>/code-1.md
 ```
 
 追加のレビュアーは、もう1回 Bash ツールを `run_in_background: true` で呼ぶ。
@@ -84,7 +84,7 @@ dev-relay review code --design <設計書の絶対パス> \
 ```bash
 dev-relay review code --design <設計書の絶対パス> \
   --extra --exclude <通常のレビューで使う id> \
-  --out <リポジトリの絶対パス>/.dev-relay/code-review-<topic>-1-extra.md
+  --out <work.review>/code-1-extra.md
 ```
 
 通知が来るまでの間に、自分の確認作業を進める。通知が来たら `--out` のファイルを読む。
@@ -124,7 +124,9 @@ dev-relay review code --design <設計書の絶対パス> \
 
 - **分けるのは、最初の実装者を起動する前。** 途中から分けると、先に動いていた実装者がすでに書いたファイルを、後から入った実装者が上書きする。
 - 各実装者への指示文に、担当するファイルと、担当外（作らない、変えない）のファイルを書く（`implementer-prompt.md` の `{{SCOPE}}`）。同じ作業ツリーで別の実装者が同時に動いていることも伝える。
-- テストとその実行は、1つの組に持たせる。ほかの組は、テストの実行を待たずに報告してよい。
+- テストを書くのは1つの組に持たせる。ほかの組は、テストの実行を待たずに報告してよい。
+- **テストの全件の実行はメインセッションが行う。** 実装者には、担当のテストだけを実行させる（絞り込みの方法を指示文に書く）。実装者がそれぞれ全件を何度も走らせると、待ち時間が延び、負荷で時間に依存するテストが落ちる。
+- 名前で広く止めるコマンド（`pkill -f` など）を使わないよう、指示文に書く。別の実装者の実行まで止めることがある。
 - 起動は同時に行う。Agent ツールなら、1回の応答に呼び出しを組の数だけ並べる。Herdr の子エージェントなら、`hc run --bg` を組の数だけ実行し、`hc wait --children all` で待つ。
 - 報告は実装者ごとに受け取る。差し戻しは、そのファイルの担当に送る。
 - 全員が終わってから、メインセッションが全体のテストを実行し、コードレビューをまとめて1回起動する。途中の「テスト通過」は、ほかの組のファイルが揃う前の結果なので、確認の代わりにならない。
@@ -138,7 +140,7 @@ dev-relay review code --design <設計書の絶対パス> \
 # 埋めた指示文をファイルに書いてから起動する（長い文面をコマンド引数に入れない）
 hc run --bg --name impl-<topic> --cwd <作業する場所の絶対パス> \
   claude --model sonnet --permission-mode acceptEdits \
-  "<リポジトリの絶対パス>/.dev-relay/impl-brief-<topic>.md を読み、その指示に従ってください。完了したとき、または止まったときは hc send $HC_TERMINAL_ID で報告してください。"
+  "<work.impl>/brief.md を読み、その指示に従ってください。完了したとき、または止まったときは hc send $HC_TERMINAL_ID で報告してください。"
 
 hc wait --children any      # 報告、停止、終了のどれかが来るまで待つ
 hc send impl-<topic> "<差し戻しの文面>"
@@ -170,8 +172,8 @@ Herdr の子エージェント方式では、Herdr の worktree 機能（スペ�
 
 ### worktree で変わること
 
-- **設計書は絶対パスで渡す。** `.dev-relay/` は git 管理外なので、worktree には入らない。
-- **レビューは worktree を対象に実行する。** スクリプトに `--repo <worktree の絶対パス>` を付ける。結果は元のリポジトリ側に残したいので、`--out` は元のリポジトリの `.dev-relay/` の絶対パスにする。worktree の場所とブランチ名は、実装者の報告の「作業した場所」で確かめる。
+- **設計書は絶対パスで渡す。** `.dev-relay/` は git 管理外なので、worktree には入らない。`dev-relay work dir` は元のリポジトリで実行する。
+- **レビューは worktree を対象に実行する。** スクリプトに `--repo <worktree の絶対パス>` を付ける。結果は元のリポジトリ側に残したいので、`--out` は元のリポジトリの `<work.review>/` にする。worktree の場所とブランチ名は、実装者の報告の「作業した場所」で確かめる。
 - **依存関係の準備が要る。** 新しい worktree には `node_modules` や `.venv` が無い。実装者への「追加の制約」に、最初に依存関係をインストールすることを書く。`.env` など git 管理外で必要なファイルは、リポジトリの `.worktreeinclude` に書いておくとコピーされる。
 - **分岐元を確かめる。** Claude Code の worktree は、既定ではデフォルトブランチから分岐する。今いるブランチの続きを作業させたいときは、設定の `worktree.baseRef` を `"head"` にする必要がある。分岐元が意図と違うと、実装者は古いコードの上で作業することになる。
 - **終わり方が変わる。** 差分は元のフォルダではなく、worktree のブランチに残る。ユーザーが「コミットして」と言ったら worktree のブランチにコミットし、そのあとマージするか PR を作るかをユーザーに聞く。変更の無い worktree は自動で片付けられるが、変更のある worktree は残る。作業が取り込まれたあとに片付けるかどうかも、ユーザーに聞く。

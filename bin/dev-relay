@@ -18,6 +18,8 @@ usage() {
   refresh check                 前回の記録と今を比べ、変化を表示する
   refresh save                  今の状態を記録し、確認した日を今日にする
   refresh notice [--hook]       知らせることがあれば1行表示する（SessionStart のフックが呼ぶ）
+  work dir <topic>              作業のフォルダ（.dev-relay/<topic>/ と review/ impl/ logs/）を作り、パスを表示する
+  work done <topic | pr/<n>>    終わった作業を .dev-relay/done/ に移す
   smoke [--reviewer ID]... [--vendors <一覧|none>]
                 本物のレビュアーを作り物の差分に対して動かし、出力形式を確かめる
   smoke check <結果ファイル>    結果ファイルが出力形式どおりかを調べる
@@ -54,6 +56,7 @@ case "${1:-}" in
       feedback|ci-log|respond) exec bash "$DEV_RELAY_ROOT/scripts/pr-respond.sh" "$@" ;;
       *) exec bash "$DEV_RELAY_ROOT/scripts/pr.sh" "$@" ;;
     esac ;;
+  work) shift; exec bash "$DEV_RELAY_ROOT/scripts/work.sh" "$@" ;;
   smoke) shift; exec bash "$DEV_RELAY_ROOT/scripts/smoke.sh" "$@" ;;
   *) echo "error: 知らないサブコマンドです: $1" >&2; usage >&2; exit 1 ;;
 esac

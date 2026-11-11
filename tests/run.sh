@@ -1,9 +1,41 @@
 #!/usr/bin/env bash
 # dev-relay のテスト。本物のモデルは呼ばない（tests/stubs/ の偽の CLI だけを使う）。
-# 使い方: bash tests/run.sh    （macOS 標準の bash 3.2 でも /bin/bash tests/run.sh で動く）
-# 1件ごとに "ok <番号> - <名前>" か "not ok <番号> - <名前>" を出す。1件でも落ちたら終了コード 1。
+# 使い方: bash tests/run.sh [-j 並列数] [番号 | 番号-番号 | 98a ...]
+#   （macOS 標準の bash 3.2 でも /bin/bash tests/run.sh で動く）
+#   番号は、テストの名前の先頭の語。数で選ぶと枝番も入る（98 なら 98 と 98a）。98a のように書けば、その1件だけ。
+#   省略すると全件。並列数の既定は DEV_RELAY_TEST_JOBS、無ければ CPU の数（上限 8）。-j 1 で1件ずつ。
+# 1件ごとに "ok <番号> - <名前>" か "not ok <番号> - <名前>" を、並びの順に出す（並列でも順は変わらない）。
+# 1件でも落ちたら終了コード 1。引数の誤りと、選んだテストが1件も無いときは 2。
 
 set -u
+
+usage() { sed -n '3,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+JOBS="${DEV_RELAY_TEST_JOBS:-}"
+SELECT=""
+SELECT_RE='^[0-9]+(-[0-9]+)?$|^[0-9]+[a-z]+$'
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -j) [ $# -ge 2 ] || { echo "-j に並列数がありません" >&2; exit 2; }
+        JOBS="$2"; shift 2 ;;
+    -j*) JOBS="${1#-j}"; shift ;;
+    -*) echo "知らないオプション: $1" >&2; exit 2 ;;
+    *) [[ $1 =~ $SELECT_RE ]] || { echo "テストの番号の形ではありません: $1" >&2; exit 2; }
+       SELECT="$SELECT $1"; shift ;;
+  esac
+done
+if [ -z "$JOBS" ]; then
+  JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+  case "$JOBS" in ''|*[!0-9]*) JOBS=1 ;; esac
+  [ "$JOBS" -le 8 ] || JOBS=8
+fi
+# 00 や 08 も数として読む（10# を付けないと 08 は8進数の誤りになる）
+case "$JOBS" in ''|*[!0-9]*) JOBS_OK="" ;; *) JOBS_OK=yes; JOBS=$((10#$JOBS)) ;; esac
+if [ -z "$JOBS_OK" ] || [ "$JOBS" -lt 1 ]; then
+  echo "並列数は1以上の整数にしてください: $JOBS" >&2
+  exit 2
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -16,15 +48,16 @@ NOREPLY="test@""users.noreply.github.com"
 WORK="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "${WORK:?}"' EXIT
 
-N=0
 PASSED=0
 FAILED=0
+COUNT=0
 
 # ---- テストの道具 -----------------------------------------------------------
 
 fail() { FAIL=1; echo "# FAIL: $*" >&2; }
 
-skip() { printf '%s\n' "$*" > "$WORK/skip"; }
+# SKIP_FILE はテストごとに run_selected が決める
+skip() { printf '%s\n' "$*" > "$SKIP_FILE"; }
 
 assert_rc() {
   if [ "$RC" -ne "$1" ]; then
@@ -2710,15 +2743,16 @@ t_pr_draft_path() {
   pr_env
   git -C "$REPO" checkout -q -b feature/foo
   dr pr draft-path; assert_rc 0
-  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-feature-foo.md" "下書きのパス"
-  [ -d "$REPO/.dev-relay" ] || fail ".dev-relay フォルダができていない"
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr/feature-foo/body.md" "下書きのパス"
+  [ -d "$REPO/.dev-relay/pr/feature-foo" ] || fail ".dev-relay/pr/feature-foo フォルダができていない"
+  [ ! -e "$REPO/.dev-relay/pr/feature-foo/body.md" ] || fail "body.md は作らない"
   assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
   git -C "$REPO" checkout -q -b "fix/a#b"
   dr pr draft-path; assert_rc 0
-  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-fix-a-b.md" "英数字と . _ - 以外は - に置き換える"
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr/fix-a-b/body.md" "英数字と . _ - 以外は - に置き換える"
   git -C "$REPO" checkout -q --detach
   dr pr draft-path; assert_rc 0
-  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr-detached.md" "ブランチ名が取れないとき"
+  assert_eq "$(cat "$T/out")" "$REPO/.dev-relay/pr/detached/body.md" "ブランチ名が取れないとき"
   mkdir "$T/outside"
   dr_in "$T/outside" pr draft-path; assert_rc 1
 }
@@ -2882,9 +2916,9 @@ t_fb_feedback() {
   assert_eq "$(kv fb.threads.todo)" 5 "fb.threads.todo"
   assert_eq "$(kv fb.threads.waiting)" 1 "fb.threads.waiting"
   assert_eq "$(kv fb.comments.todo)" 3 "fb.comments.todo"
-  f="$REPO/.dev-relay/pr-feature-x-feedback.md"
+  f="$REPO/.dev-relay/pr/feature-x/feedback.md"
   assert_eq "$(kv fb.items)" "$f" "fb.items"
-  assert_eq "$(kv fb.drafts)" "$REPO/.dev-relay/respond-feature-x" "fb.drafts"
+  assert_eq "$(kv fb.drafts)" "$REPO/.dev-relay/pr/feature-x/drafts" "fb.drafts"
   [ -d "$(kv fb.drafts)" ] || fail "下書きのフォルダを作っていない"
   assert_eq "$(kv pr.ready)" yes "pr.ready"
   assert_eq "$(kv pr.blockers)" "" "pr.blockers"
@@ -2956,7 +2990,7 @@ t_fb_no_lookup_without_permission() {
     assert_eq "$(kv pr.blockers)" "$p" "pr.blockers ($p)"
     assert_eq "$(kv pr.account)" "" "アカウントは出ない ($p)"
     assert_eq "$(kv pr.number)" "" "PR は出ない ($p)"
-    [ ! -e "$REPO/.dev-relay/pr-feature-x-feedback.md" ] || fail "一覧のファイルを書いた ($p)"
+    [ ! -e "$REPO/.dev-relay/pr" ] || fail "フォルダを作った ($p)"
     dr pr ci-log 111; assert_rc 1
     assert_eq "$(kv pr.blockers)" "$p" "ci-log の pr.blockers ($p)"
     dr pr respond --plan "$PD/plan" --dry-run; assert_rc 1
@@ -3050,7 +3084,7 @@ t_fb_ci_log() {
   fb_env || return 0
   export STUB_GH_RUN_LOG="$(printf 'step failed: boom\nsecond line')"
   dr pr ci-log 111; assert_rc 0
-  f="$REPO/.dev-relay/pr-feature-x-ci-111.log"
+  f="$REPO/.dev-relay/pr/feature-x/ci-111.log"
   assert_eq "$(kv ci.log)" "$f" "ci.log"
   assert_eq "$(kv ci.log.lines)" 2 "ci.log.lines"
   assert_key_order ci.log ci.log.lines
@@ -3059,7 +3093,7 @@ t_fb_ci_log() {
   assert_has "$STUB_LOG" "gh run view 111 -R github.com/stub/repo --log-failed"
   # 成功した run でも、この PR の CI にあれば読める
   dr pr ci-log 112; assert_rc 0
-  assert_eq "$(kv ci.log)" "$REPO/.dev-relay/pr-feature-x-ci-112.log" "pass の run: ci.log"
+  assert_eq "$(kv ci.log)" "$REPO/.dev-relay/pr/feature-x/ci-112.log" "pass の run: ci.log"
   # 読むだけなので、先頭が違う、作者が違うでも止まらない
   fb_head "1111111111111111111111111111111111111111"
   dr pr ci-log 111; assert_rc 0
@@ -3552,10 +3586,11 @@ t_fb_diff_relative() {
 
 # G2: 書き込み先がシンボリックリンクなら、リンク先を上書きせずに 1 で止まる
 t_fb_symlink_targets() {
-  local d tgt c
+  local d pd tgt c
   fb_env || return 0
   d="$REPO/.dev-relay"
-  mkdir -p "$d"
+  pd="$d/pr/feature-x"
+  mkdir -p "$pd"
   tgt="$T/victim.txt"
   # 一覧のファイル、下書きのフォルダ、CI のログ
   for c in items drafts ci-log; do
@@ -3563,28 +3598,32 @@ t_fb_symlink_targets() {
     rm -rf "$T/victim-dir"
     mkdir "$T/victim-dir"
     case "$c" in
-      items)   ln -s "$tgt" "$d/pr-feature-x-feedback.md"; dr pr feedback ;;
-      drafts)  ln -s "$T/victim-dir" "$d/respond-feature-x"; dr pr feedback ;;
-      ci-log)  ln -s "$tgt" "$d/pr-feature-x-ci-111.log"; dr pr ci-log 111 ;;
+      items)   ln -s "$tgt" "$pd/feedback.md"; dr pr feedback ;;
+      drafts)  ln -s "$T/victim-dir" "$pd/drafts"; dr pr feedback ;;
+      ci-log)  ln -s "$tgt" "$pd/ci-111.log"; dr pr ci-log 111 ;;
     esac
     assert_eq "$RC" 1 "終了コード ($c)"
     assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー ($c)"
     assert_eq "$(cat "$tgt")" original "リンク先のファイルが変わらない ($c)"
     assert_eq "$(ls -A "$T/victim-dir" | wc -l | tr -d ' ')" 0 "リンク先のフォルダに何も書かない ($c)"
-    rm -f "$d/pr-feature-x-feedback.md" "$d/respond-feature-x" "$d/pr-feature-x-ci-111.log"
+    rm -f "$pd/feedback.md" "$pd/drafts" "$pd/ci-111.log"
   done
   # 対照: リンクが無ければ、どちらも通る
   dr pr feedback; assert_rc 0
   dr pr ci-log 111; assert_rc 0
-  # .dev-relay そのものがシンボリックリンク
-  for c in feedback ci-log; do
+  # .dev-relay、.dev-relay/pr、.dev-relay/pr/<name> のどれかがシンボリックリンク
+  for c in dev-relay/feedback dev-relay/ci-log pr/feedback pr/ci-log name/feedback name/ci-log; do
     rm -rf "$d" "$T/elsewhere"
     mkdir "$T/elsewhere"
-    ln -s "$T/elsewhere" "$d"
-    if [ "$c" = feedback ]; then dr pr feedback; else dr pr ci-log 111; fi
-    assert_eq "$RC" 1 "終了コード (.dev-relay がリンク、$c)"
-    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー (.dev-relay がリンク、$c)"
-    assert_eq "$(ls -A "$T/elsewhere" | wc -l | tr -d ' ')" 0 "リンク先に何も書かない (.dev-relay がリンク、$c)"
+    case "${c%%/*}" in
+      dev-relay) ln -s "$T/elsewhere" "$d" ;;
+      pr)        mkdir "$d"; ln -s "$T/elsewhere" "$d/pr" ;;
+      name)      mkdir -p "$d/pr"; ln -s "$T/elsewhere" "$pd" ;;
+    esac
+    if [ "${c#*/}" = feedback ]; then dr pr feedback; else dr pr ci-log 111; fi
+    assert_eq "$RC" 1 "終了コード (${c%%/*} がリンク、${c#*/})"
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー (${c%%/*} がリンク、${c#*/})"
+    assert_eq "$(ls -A "$T/elsewhere" | wc -l | tr -d ' ')" 0 "リンク先に何も書かない (${c%%/*} がリンク、${c#*/})"
   done
 }
 
@@ -3678,25 +3717,384 @@ t_fb_ci_log_truncated() {
   assert_eq "$(kv ci.log.lines)" 2 "PR を選べていれば読める"
 }
 
-# ---- 実行 -------------------------------------------------------------------
+# ---- work-layout: 作業フォルダを作業ごと・種類ごとに分ける -----------------------
 
-run_test() {
-  local name="$1" fn="$2" rc
-  N=$((N + 1))
-  rm -f "$WORK/skip"
-  ( FAIL=0; "$fn"; [ "$FAIL" -eq 0 ] )
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    PASSED=$((PASSED + 1))
-    if [ -f "$WORK/skip" ]; then
-      echo "ok $N - $name # SKIP $(cat "$WORK/skip")"
+# フォルダの中身（パスだけ）の一覧。シンボリックリンクは辿らず、リンクそのものを1件と数える
+tree_of() { find "$@" 2>/dev/null | sort; }
+
+t_work_dir() {
+  local r
+  new_env
+  r="$REPO/.dev-relay"
+  dr work dir t1; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$(printf 'work.dir=%s\nwork.review=%s\nwork.impl=%s\nwork.logs=%s' "$r/t1" "$r/t1/review" "$r/t1/impl" "$r/t1/logs")" "出力（4つの key がこの順）"
+  [ -d "$r/t1/review" ] && [ -d "$r/t1/impl" ] && [ -d "$r/t1/logs" ] || fail "review/ impl/ logs/ ができていない"
+  assert_eq "$(cat "$r/.gitignore")" '*' ".gitignore の中身"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
+  # 2回目も 0。置いたファイルは残る
+  printf 'keep\n' > "$r/t1/impl/brief.md"
+  dr work dir t1; assert_rc 0
+  assert_eq "$(cat "$r/t1/impl/brief.md")" keep "2回目で中身を消さない"
+  assert_eq "$(kv work.dir)" "$r/t1" "2回目の work.dir"
+  # 別の作業は、同じ .dev-relay/ の下に並ぶ
+  dr work dir t2.v-3_x; assert_rc 0
+  assert_eq "$(kv work.dir)" "$r/t2.v-3_x" "2つ目の作業"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "2つ目も git status に出ない"
+  # サブフォルダから実行しても、最上位の .dev-relay/ に作る
+  mkdir -p "$REPO/sub/deeper"
+  dr_in "$REPO/sub/deeper" work dir t3; assert_rc 0
+  assert_eq "$(kv work.dir)" "$r/t3" "サブフォルダから: work.dir"
+  [ -d "$r/t3/logs" ] || fail "最上位の .dev-relay/t3/logs が無い"
+  [ ! -e "$REPO/sub/.dev-relay" ] && [ ! -e "$REPO/sub/deeper/.dev-relay" ] || fail "サブフォルダに .dev-relay を作った"
+}
+
+t_work_dir_bad_names() {
+  local n long64 long65
+  new_env
+  mkdir "$T/outside"
+  long64="$(printf 'a%.0s' $(seq 1 64))"
+  long65="${long64}a"
+  for n in "" "../x" "a/b" ".x" "-x" done pr review "$long65"; do
+    dr work dir "$n"
+    assert_eq "$RC" 1 "終了コード ('$n')"
+    [ ! -e "$REPO/.dev-relay" ] || fail ".dev-relay を作った ('$n')"
+    [ ! -e "$REPO/x" ] || fail "リポジトリの直下に x を作った ('$n')"
+  done
+  dr work dir; assert_eq "$RC" 1 "名前なし: 終了コード"
+  [ ! -e "$REPO/.dev-relay" ] || fail ".dev-relay を作った（名前なし）"
+  # git リポジトリの外
+  dr_in "$T/outside" work dir t; assert_rc 1
+  [ -s "$T/err" ] || fail "標準エラーに理由が無い"
+  [ ! -e "$T/outside/.dev-relay" ] || fail "git の外に .dev-relay を作った"
+  # 境界: 64文字は通る
+  dr work dir "$long64"; assert_rc 0
+  [ -d "$REPO/.dev-relay/$long64/logs" ] || fail "64文字の名前でフォルダができていない"
+}
+
+# 各段を、中身のある別の場所へのシンボリックリンクに差し替えて、何も作らず何も移さないことを確かめる
+t_work_symlinks() {
+  local r lvl before_e before_r
+  new_env
+  r="$REPO/.dev-relay"
+  # work dir: .dev-relay、<topic>、review、impl、logs
+  for lvl in dev-relay topic review impl logs; do
+    rm -rf "$r" "$T/elsewhere"
+    mkdir "$T/elsewhere"
+    case "$lvl" in
+      dev-relay) ln -s "$T/elsewhere" "$r" ;;
+      topic)     mkdir "$r"; ln -s "$T/elsewhere" "$r/t" ;;
+      *)         mkdir -p "$r/t"; ln -s "$T/elsewhere" "$r/t/$lvl" ;;
+    esac
+    before_e="$(tree_of "$T/elsewhere")"
+    before_r="$(tree_of "$r")"
+    dr work dir t
+    assert_eq "$RC" 1 "work dir 終了コード (${lvl} がリンク)"
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "work dir 標準エラー (${lvl} がリンク)"
+    assert_eq "$(tree_of "$T/elsewhere")" "$before_e" "work dir リンク先が変わらない (${lvl} がリンク)"
+    assert_eq "$(tree_of "$r")" "$before_r" "work dir 何も作らない (${lvl} がリンク)"
+  done
+  # work done: .dev-relay、<topic>、done。pr/<n> なら pr、pr/<n>、done/pr
+  for lvl in dev-relay topic done pr-pr pr-name pr-done; do
+    rm -rf "$r" "$T/elsewhere"
+    mkdir -p "$T/elsewhere/t"
+    printf 'marker\n' > "$T/elsewhere/marker"
+    case "$lvl" in
+      dev-relay) ln -s "$T/elsewhere" "$r" ;;
+      topic)     mkdir "$r"; ln -s "$T/elsewhere" "$r/t" ;;
+      done)      mkdir -p "$r/t"; ln -s "$T/elsewhere" "$r/done" ;;
+      pr-pr)     mkdir -p "$r"; ln -s "$T/elsewhere" "$r/pr" ;;
+      pr-name)   mkdir -p "$r/pr"; ln -s "$T/elsewhere" "$r/pr/p" ;;
+      pr-done)   mkdir -p "$r/pr/p" "$r/done"; ln -s "$T/elsewhere" "$r/done/pr" ;;
+    esac
+    before_e="$(tree_of "$T/elsewhere")"
+    before_r="$(tree_of "$r")"
+    case "$lvl" in pr-*) dr work done pr/p ;; *) dr work done t ;; esac
+    assert_eq "$RC" 1 "work done 終了コード (${lvl} がリンク)"
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "work done 標準エラー (${lvl} がリンク)"
+    assert_eq "$(tree_of "$T/elsewhere")" "$before_e" "work done リンク先が変わらない (${lvl} がリンク)"
+    assert_eq "$(tree_of "$r")" "$before_r" "work done 何も移さない (${lvl} がリンク)"
+  done
+}
+
+t_work_done() {
+  local r i
+  new_env
+  r="$REPO/.dev-relay"
+  dr work dir t; assert_rc 0
+  printf 'one\n' > "$r/t/impl/a.md"
+  dr work done t; assert_rc 0
+  assert_eq "$(cat "$T/out")" "work.done=$r/done/t" "出力"
+  [ ! -e "$r/t" ] || fail "元のフォルダが残っている"
+  assert_eq "$(cat "$r/done/t/impl/a.md")" one "中身ごと移る"
+  [ -d "$r/done/t/review" ] && [ -d "$r/done/t/logs" ] || fail "空のフォルダも移る"
+  # 同じ名前が done/ にあれば -2、-3
+  for i in 2 3; do
+    dr work dir t; assert_rc 0
+    printf 'v%s\n' "$i" > "$r/t/impl/a.md"
+    dr work done t; assert_rc 0
+    assert_eq "$(cat "$T/out")" "work.done=$r/done/t-$i" "出力（$i 回目）"
+    assert_eq "$(cat "$r/done/t-$i/impl/a.md")" "v$i" "t-$i の中身"
+  done
+  assert_eq "$(cat "$r/done/t/impl/a.md")" one "先に移したものを上書きしない"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
+  # pr/<n> は done/pr/<n> へ。同じ名前があれば -2
+  mkdir -p "$r/pr/feat-x/drafts"
+  printf 'body\n' > "$r/pr/feat-x/body.md"
+  dr work done pr/feat-x; assert_rc 0
+  assert_eq "$(cat "$T/out")" "work.done=$r/done/pr/feat-x" "pr: 出力"
+  [ ! -e "$r/pr/feat-x" ] || fail "pr: 元のフォルダが残っている"
+  assert_eq "$(cat "$r/done/pr/feat-x/body.md")" body "pr: 中身ごと移る"
+  [ -d "$r/done/pr/feat-x/drafts" ] || fail "pr: drafts/ も移る"
+  mkdir -p "$r/pr/feat-x"
+  printf 'body2\n' > "$r/pr/feat-x/body.md"
+  dr work done pr/feat-x; assert_rc 0
+  assert_eq "$(cat "$T/out")" "work.done=$r/done/pr/feat-x-2" "pr: 2回目の出力"
+  assert_eq "$(cat "$r/done/pr/feat-x-2/body.md")" body2 "pr: 2回目の中身"
+  assert_eq "$(cat "$r/done/pr/feat-x/body.md")" body "pr: 先に移したものを上書きしない"
+  # 無いもの、フォルダでないものは 1
+  printf 'plain\n' > "$r/file.txt"
+  for i in nosuch pr/nosuch file.txt; do
+    dr work done "$i"
+    assert_eq "$RC" 1 "終了コード ($i)"
+  done
+  assert_eq "$(cat "$r/file.txt")" plain "フォルダでないものは動かさない"
+}
+
+t_work_done_bad_names() {
+  local r n before long65
+  new_env
+  r="$REPO/.dev-relay"
+  dr work dir t; assert_rc 0
+  mkdir -p "$r/pr/p" "$r/done/t"
+  long65="$(printf 'a%.0s' $(seq 1 65))"
+  before="$(tree_of "$r")"
+  for n in "" "../x" "a/b" ".x" "-x" done pr review "$long65" "done/t" "pr/" "pr/." "pr/.." "pr/a/b" "pr/a b" "pr/../t" "./t"; do
+    dr work done "$n"
+    assert_eq "$RC" 1 "終了コード ('$n')"
+    assert_eq "$(tree_of "$r")" "$before" "何も動かない ('$n')"
+  done
+  dr work done; assert_eq "$RC" 1 "名前なし: 終了コード"
+  assert_eq "$(tree_of "$r")" "$before" "何も動かない（名前なし）"
+}
+
+t_review_out_fresh_nested() {
+  local f
+  new_env; with_codex
+  set_user_vendors openai
+  [ ! -e "$REPO/.dev-relay" ] || fail "前提: .dev-relay/ がまだ無いこと"
+  f="$REPO/.dev-relay/t/review/code-1.md"
+  dr review code --intent "目的" --out "$f"
+  assert_rc 0
+  assert_file "$f"
+  assert_eq "$(cat "$REPO/.dev-relay/.gitignore")" '*' ".dev-relay/.gitignore の中身"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
+}
+
+t_review_default_out() {
+  local res
+  new_env; with_codex
+  set_user_vendors openai
+  dr review code --intent "目的"; assert_rc 0
+  res="$(last_line)"
+  assert_file "$res"
+  assert_eq "$(dirname "$res")" "$REPO/.dev-relay/review" "code: 置き場所"
+  case "$(basename "$res")" in code-*.md) ;; *) fail "code: 名前が code- で始まらない: $res" ;; esac
+  case "$res" in *-review-*) fail "code: 古い名前（-review-）のまま: $res" ;; esac
+  printf '# 設計書\nDESIGNBODY\n' > "$T/design.md"
+  dr review design "$T/design.md"; assert_rc 0
+  res="$(last_line)"
+  assert_file "$res"
+  assert_eq "$(dirname "$res")" "$REPO/.dev-relay/review" "design: 置き場所"
+  case "$(basename "$res")" in design-*.md) ;; *) fail "design: 名前が design- で始まらない: $res" ;; esac
+  case "$res" in *-review-*) fail "design: 古い名前（-review-）のまま: $res" ;; esac
+  assert_eq "$(ls -A "$REPO/.dev-relay" | tr '\n' ' ')" ".gitignore review " ".dev-relay の直下"
+  assert_eq "$(git -C "$REPO" status --porcelain | grep -c 'dev-relay' || true)" 0 "git status に出ない"
+}
+
+t_review_default_out_symlinks() {
+  local lvl
+  new_env; with_codex
+  set_user_vendors openai
+  for lvl in dev-relay review; do
+    rm -rf "$REPO/.dev-relay" "$T/victim"
+    mkdir -p "$T/victim"
+    if [ "$lvl" = dev-relay ]; then
+      ln -s "$T/victim" "$REPO/.dev-relay"
     else
-      echo "ok $N - $name"
+      mkdir -p "$REPO/.dev-relay"
+      printf '*\n' > "$REPO/.dev-relay/.gitignore"
+      ln -s "$T/victim" "$REPO/.dev-relay/review"
+    fi
+    : > "$STUB_LOG"
+    dr review code --intent "目的"
+    assert_rc 1
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー ($lvl)"
+    assert_eq "$(ls -A "$T/victim" | wc -l | tr -d ' ')" 0 "リンク先に何も書かない ($lvl)"
+    assert_eq "$(codex_runs)" 0 "Codex を呼ばない ($lvl)"
+  done
+}
+
+# 並列数と番号の誤りは、テストを1件も動かさずに 2 で戻る（8秒で打ち切る。待ち続けると 142）
+t_runner_bad_args() {
+  local a
+  for a in "-j 00" "-j 0" "-j x" "-j" "1-2-3" "9999"; do
+    RC=0
+    # shellcheck disable=SC2086
+    perl -e 'alarm 8; exec @ARGV' /bin/bash "$ROOT/tests/run.sh" $a > "$WORK/runner.out" 2> "$WORK/runner.err" || RC=$?
+    assert_eq "$RC" 2 "終了コード ($a)"
+    assert_lacks "$WORK/runner.out" "ok "
+  done
+}
+
+t_pr_draft_path_symlinks() {
+  local r lvl before_e before_r
+  pr_env
+  git -C "$REPO" checkout -q -b feature/foo
+  r="$REPO/.dev-relay"
+  for lvl in dev-relay pr name; do
+    rm -rf "$r" "$T/elsewhere"
+    mkdir "$T/elsewhere"
+    case "$lvl" in
+      dev-relay) ln -s "$T/elsewhere" "$r" ;;
+      pr)        mkdir "$r"; ln -s "$T/elsewhere" "$r/pr" ;;
+      name)      mkdir -p "$r/pr"; ln -s "$T/elsewhere" "$r/pr/feature-foo" ;;
+    esac
+    before_e="$(tree_of "$T/elsewhere")"
+    before_r="$(tree_of "$r")"
+    dr pr draft-path
+    assert_eq "$RC" 1 "終了コード (${lvl} がリンク)"
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー (${lvl} がリンク)"
+    assert_eq "$(tree_of "$T/elsewhere")" "$before_e" "リンク先に何も作らない (${lvl} がリンク)"
+    assert_eq "$(tree_of "$r")" "$before_r" "何も作らない (${lvl} がリンク)"
+  done
+  # 対照: リンクが無ければ通る
+  rm -rf "$r" "$T/elsewhere"
+  dr pr draft-path; assert_rc 0
+}
+
+t_work_usage() {
+  local a
+  new_env
+  for a in "" --help -h; do
+    if [ -z "$a" ]; then dr work; else dr work "$a"; fi
+    assert_eq "$RC" 0 "終了コード ('$a')"
+    assert_has "$T/out" "work dir"
+    assert_has "$T/out" "work done"
+  done
+  dr work nosuch; assert_rc 1
+  [ ! -e "$REPO/.dev-relay" ] || fail "使い方を出すだけで .dev-relay を作った"
+  # bin/dev-relay の使い方の一覧にも載る
+  dr --help; assert_rc 0
+  assert_has "$T/out" "work dir"
+  assert_has "$T/out" "work done"
+}
+
+# ---- 実行 -------------------------------------------------------------------
+# run_test は登録だけをする。全部を登録したあと、run_selected が選ばれたものを並列に動かし、
+# 終わったものから並びの順に結果を出す。各テストの標準出力と標準エラーは一時ファイルに溜め、
+# 結果の行の直前に標準エラーへまとめて出す（並列でも、ほかのテストの出力と混ざらない）。
+# 3つ目の引数に alone を付けたテストは、ほかのテストと重ねずに、最初にまとめて動かす（alone どうしは重ねる）。
+# 経過時間を測るテスト（「N秒以内に戻る」など）に付ける。負荷が高いと時間が延びて落ちるため。
+
+NAMES=()
+FNS=()
+ALONE=()
+run_test() {
+  NAMES[$COUNT]="$1"
+  FNS[$COUNT]="$2"
+  ALONE[$COUNT]="${3:-}"
+  COUNT=$((COUNT + 1))
+}
+
+# $1 = テストの名前の先頭の語（"98a" など）。SELECT が空なら全部を選ぶ。
+selected() {
+  local tok="$1" num a
+  [ -z "$SELECT" ] && return 0
+  num="${tok%%[!0-9]*}"
+  for a in $SELECT; do
+    case "$a" in
+      *[a-z]*) [ "$a" = "$tok" ] && return 0 ;;
+      *-*) [ -n "$num" ] && [ "$num" -ge "${a%-*}" ] && [ "$num" -le "${a#*-}" ] && return 0 ;;
+      *) [ -n "$num" ] && [ "$num" -eq "$a" ] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+start_test() {
+  local i="$1"
+  (
+    ( SKIP_FILE="$WORK/skip.$i"; FAIL=0; "${FNS[$i]}"; [ "$FAIL" -eq 0 ] ) > "$WORK/log.$i" 2>&1
+    echo "$?" > "$WORK/rc.$i.tmp"
+    mv "$WORK/rc.$i.tmp" "$WORK/rc.$i"
+  ) &
+}
+
+report_test() {
+  local i="$1" n=$(($1 + 1)) name="${NAMES[$1]}"
+  [ -s "$WORK/log.$i" ] && cat "$WORK/log.$i" >&2
+  if [ "$(cat "$WORK/rc.$i")" = 0 ]; then
+    PASSED=$((PASSED + 1))
+    if [ -f "$WORK/skip.$i" ]; then
+      echo "ok $n - $name # SKIP $(cat "$WORK/skip.$i")"
+    else
+      echo "ok $n - $name"
     fi
   else
     FAILED=$((FAILED + 1))
-    echo "not ok $N - $name"
+    echo "not ok $n - $name"
   fi
+}
+
+# 動かす順（order）と結果を出す順（sel）を分ける。alone のテストを先にまとめて動かし
+# （alone どうしは重ねてよい。ほとんど sleep で待つだけなので、互いの時間を延ばさない）、
+# それが全部終わってから残りを動かす。結果は、どちらの場合も sel の順に出す。
+run_selected() {
+  local -a sel order
+  local total nalone next=0 shown=0 running alone_left k i progressed
+  sel=()
+  order=()
+  i=0
+  while [ "$i" -lt "$COUNT" ]; do
+    selected "${NAMES[$i]%% *}" && sel[${#sel[@]}]="$i"
+    i=$((i + 1))
+  done
+  total=${#sel[@]}
+  if [ "$total" -eq 0 ]; then
+    echo "選んだ番号に当たるテストがありません:$SELECT" >&2
+    exit 2
+  fi
+  for i in "${sel[@]}"; do [ -z "${ALONE[$i]}" ] || order[${#order[@]}]="$i"; done
+  nalone=${#order[@]}
+  for i in "${sel[@]}"; do [ -n "${ALONE[$i]}" ] || order[${#order[@]}]="$i"; done
+  while [ "$shown" -lt "$total" ]; do
+    running=0
+    alone_left=0
+    k=0
+    while [ "$k" -lt "$next" ]; do
+      if [ ! -f "$WORK/rc.${order[$k]}" ]; then
+        running=$((running + 1))
+        [ "$k" -ge "$nalone" ] || alone_left=$((alone_left + 1))
+      fi
+      k=$((k + 1))
+    done
+    while [ "$next" -lt "$total" ] && [ "$running" -lt "$JOBS" ]; do
+      # alone のものが残っている間は、残りを始めない
+      [ "$next" -lt "$nalone" ] || [ "$alone_left" -eq 0 ] || break
+      start_test "${order[$next]}"
+      [ "$next" -ge "$nalone" ] || alone_left=$((alone_left + 1))
+      next=$((next + 1))
+      running=$((running + 1))
+    done
+    progressed=""
+    while [ "$shown" -lt "$total" ] && [ -f "$WORK/rc.${sel[$shown]}" ]; do
+      report_test "${sel[$shown]}"
+      shown=$((shown + 1))
+      progressed=yes
+    done
+    [ -n "$progressed" ] || sleep 0.1
+  done
+  wait
 }
 
 run_test "1 bin/dev-relay: 実行権限、--help、知らないサブコマンド" t_entry
@@ -3725,7 +4123,7 @@ run_test "14c Cursor が失敗しても、作業ツリーの変化があれば 5
 run_test "15 Cursor の is_error が true なら 10" t_cursor_is_error
 run_test "15b review code --extra --model x: Cursor では 1" t_extra_model_rejected
 run_test "16 Codex の CLI が終了コード 2 なら 10" t_codex_fails
-run_test "16a タイムアウトは 124 で、期限内に戻る" t_timeout
+run_test "16a タイムアウトは 124 で、期限内に戻る" t_timeout alone
 run_test "29 結果ファイルが symlink なら、ソースを上書きせず 1" t_out_symlink
 run_test "29a 依頼文のファイルが symlink なら、ソースを上書きせず 1" t_prompt_symlink
 run_test "30 Cursor が未変更ファイルの改行を変えても 5（autocrlf=input）" t_cursor_clean_crlf
@@ -3735,7 +4133,7 @@ run_test "18e review code --out: 置き場所の検査で 1 のとき、この�
 run_test "18f review code --out: 前からあったフォルダは消さない" t_out_not_ignored_keeps_existing_dir
 run_test "18g review code --out: .dev-relay/ がまだ無くても標準の使い方は通る" t_out_fresh_dev_relay
 run_test "31 日本語名の未追跡ファイルが依頼文に入る" t_untracked_japanese
-run_test "32 timeout と gtimeout が無くても、タイムアウトは 124（perl の経路）" t_timeout_perl
+run_test "32 timeout と gtimeout が無くても、タイムアウトは 124（perl の経路）" t_timeout_perl alone
 run_test "33 機密らしい名前（空白・日本語を含む）の未追跡ファイルで警告が出る" t_sensitive_uncommitted
 run_test "33a 同じ警告が --commit でも出る" t_sensitive_commit
 run_test "33b 同じ警告が --base でも出る" t_sensitive_base
@@ -3810,7 +4208,7 @@ run_test "72 題材: base のテストが通り、change を重ねると中央�
 run_test "73 hooks/hooks.json: 正しい JSON で、SessionStart が refresh notice --hook を呼ぶ" t_hooks_json
 run_test "74 days_from_date: うるう年をまたぐ日数の差、形が違えば 1" t_days_from_date
 run_test "75 refresh save: 取得に失敗したキーは警告を出し、前回の値を引き継ぐ" t_save_keeps_on_failure
-run_test "76 refresh notice --hook: --version が止まっても、子が残っても、perl の経路でも9秒以内に、何も出さず 0 で戻る" t_hook_returns_when_version_hangs
+run_test "76 refresh notice --hook: --version が止まっても、子が残っても、perl の経路でも9秒以内に、何も出さず 0 で戻る" t_hook_returns_when_version_hangs alone
 run_test "77 refresh notice: 記録を作っている間に refresh save が終わっても、save の記録が残る" t_notice_does_not_clobber_save
 run_test "78 refresh notice: 記録が壊れていると、書き換えずに読めない旨を知らせ、save のあとは出ない" t_notice_corrupt_snapshot
 run_test "79 refresh save: 前回の記録からの変化を saved より前に出す" t_save_prints_changes
@@ -3818,7 +4216,7 @@ run_test "80 smoke: GIT_DIR と GIT_WORK_TREE が別のリポジトリを指し�
 run_test "81 smoke: 設定フォルダが相対パスでも、metered auto の carbon が動く" t_smoke_relative_config_dir
 run_test "82 smoke --reviewer: 空、空白、グロブは 1" t_smoke_bad_reviewer_value
 run_test "83 smoke: DEV_RELAY_TIMEOUT が不正なら 1" t_smoke_bad_timeout
-run_test "84 refresh notice --hook: --version が TERM を無視しても、perl の経路でも9秒以内に、何も出さず 0 で戻る" t_hook_returns_when_version_ignores_term
+run_test "84 refresh notice --hook: --version が TERM を無視しても、perl の経路でも9秒以内に、何も出さず 0 で戻る" t_hook_returns_when_version_ignores_term alone
 run_test "85 refresh notice: 見直しの日付が2件過ぎていると、括弧の中に ほか1件 を付ける" t_notice_two_review_dates
 run_test "86 smoke: Cursor が題材の無視されるファイル（__pycache__）を作っても pass" t_smoke_cursor_ignored_file
 
@@ -3865,7 +4263,7 @@ run_test "117 pr recent: PR の題が pr: で、無ければコミットの題�
 run_test "117a pr create --dry-run / pr recent: xpg_echo が有効でも、題のバックスラッシュがそのまま出る" t_pr_output_backslashes
 run_test "118 pr draft-path: ブランチ名を - に直した下書きのパスを出し、フォルダを作り、git status に出さない。git リポジトリの外は 1" t_pr_draft_path
 run_test "119 pr: 知らないサブコマンドは 1、--help と -h は 0" t_pr_unknown_subcommand
-run_test "120 run_with_timeout（perl の経路）: 期限のあと孫プロセスも止まり、標準入力は子に渡る" t_timeout_kills_group
+run_test "120 run_with_timeout（perl の経路）: 期限のあと孫プロセスも止まり、標準入力は子に渡る" t_timeout_kills_group alone
 run_test "121 pr feedback: 題材から4.5の key、todo と waiting の数、CI、一覧のファイル（引用、機械の行が無いこと、改行の置き換え）が出て、何も送らず、参照が残らない" t_fb_feedback
 run_test "122 pr feedback / ci-log / respond: 許可が無ければ（未確認でも off でも）GitHub に照会せず、fetch もしない" t_fb_no_lookup_without_permission
 run_test "123 pr feedback: no-pr、multiple-prs、not-own-pr、feedback-truncated、feedback-unknown が、それぞれの理由で止まり、終了コードは 0" t_fb_blockers
@@ -3887,5 +4285,18 @@ run_test "138 pr respond / recent: 署名したコミットと log.showSignature
 run_test "139 pr respond: MERGE_HEAD などがあれば、コミットを作る計画は operation-in-progress で 1（dry-run の前後どちらでも）、何も送らない" t_fb_operation_in_progress
 run_test "140 pr ci-log: PR を選べなかった（feedback-truncated）とき pr.blockers を出して 1" t_fb_ci_log_truncated
 
-echo "# ${PASSED} passed, ${FAILED} failed"
+run_test "141 work dir: フォルダ3つと .gitignore を作り、4つの key をこの順に出す。2回目も 0 で中身は残り、git status に出ない。サブフォルダから動かしても最上位に作る" t_work_dir
+run_test "142 work dir: 形に合わない名前（空、../x、a/b、.x、-x、done、pr、review、65文字）と git リポジトリの外は 1 で、何も作らない" t_work_dir_bad_names
+run_test "143 work dir / work done: .dev-relay、作業のフォルダ、review、impl、logs、done、pr のどれかがシンボリックリンクなら 1 で、何も作らず移さず、リンク先も変わらない" t_work_symlinks
+run_test "144 work done: <topic> と pr/<n> が done/ に中身ごと移り、同じ名前があれば -2、-3。無いもの、フォルダでないものは 1" t_work_done
+run_test "144a work done: 形に合わない名前は 1 で、何も動かさない" t_work_done_bad_names
+run_test "145 review code --out: .dev-relay/ が無いリポジトリで .dev-relay/<topic>/review/ の下に書け、.dev-relay/.gitignore ができて git status に出ない" t_review_out_fresh_nested
+run_test "146 review code / design（--out なし）: 結果が .dev-relay/review/ の下に、code- と design- で始まる名前で書かれる" t_review_default_out
+run_test "146a review（--out なし）: .dev-relay か .dev-relay/review がシンボリックリンクなら 1 で、リンク先に書かず、レビュアーを呼ばない" t_review_default_out_symlinks
+run_test "147 pr draft-path: .dev-relay、.dev-relay/pr、.dev-relay/pr/<name> がシンボリックリンクなら 1 で、リンク先に何も作らない" t_pr_draft_path_symlinks
+run_test "148 work: 引数なし、--help、-h は 0 で使い方を出し（bin/dev-relay の一覧にも載り）、知らないサブコマンドは 1" t_work_usage
+run_test "149 tests/run.sh: 並列数の誤り（00、0、数でない、無い）と番号の誤り、当たる番号が無いときは、何も動かさず 2" t_runner_bad_args
+
+run_selected
+echo "# ${PASSED} passed, ${FAILED} failed (jobs=${JOBS}, ${SECONDS}s)"
 [ "$FAILED" -eq 0 ]

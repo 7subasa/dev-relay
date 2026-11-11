@@ -258,33 +258,17 @@ fb_collect() {
   fi
 }
 
-# ブランチ名を、ファイル名に使える形に直す（pr draft-path と同じ）
-fb_branch_name() {
-  printf '%s' "${P_BRANCH:-detached}" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/-/g'
-}
-
 # ---- feedback ---------------------------------------------------------------
 
-# シンボリックリンクに書くと、リンク先（作業ファイルなど）を上書きしてしまう。引数: パス（複数可）
-refuse_symlink() {
-  local f
-  for f in "$@"; do
-    [ ! -L "$f" ] || die "シンボリックリンクには書き込めません: $f"
-  done
-}
-
 pr_feedback() {
-  local root name items drafts
+  local items drafts
   [ $# -eq 0 ] || die "feedback は引数を取りません: $1"
   fb_collect
 
   if [ "$FB_FOUND" -eq 1 ]; then
-    root="$(git rev-parse --show-toplevel)"
-    name="$(fb_branch_name)"
-    items="$root/.dev-relay/pr-${name}-feedback.md"
-    drafts="$root/.dev-relay/respond-${name}"
-    refuse_symlink "$root/.dev-relay" "$items" "$drafts"
-    ensure_out_dir "$root/.dev-relay"
+    ensure_pr_dir "$(git rev-parse --show-toplevel)" feedback.md drafts
+    items="$PR_DIR/feedback.md"
+    drafts="$PR_DIR/drafts"
     # 機械の行を除いた残りが、一覧のファイル
     cp "$TMPD/fb.jq.out" "$items"
     mkdir -p "$drafts"
@@ -327,7 +311,7 @@ pr_feedback() {
 # ---- ci-log -----------------------------------------------------------------
 
 pr_ci_log() {
-  local run="" root name out kept="" b rest lines
+  local run="" out kept="" b rest lines
   [ $# -eq 1 ] || die "使い方: dev-relay pr ci-log <run の id>"
   run="$1"
   is_re "$RE_NUM" "$run" || die "run の id は数字だけです: $run"
@@ -359,11 +343,8 @@ pr_ci_log() {
     exit 1
   fi
 
-  root="$(git rev-parse --show-toplevel)"
-  name="$(fb_branch_name)"
-  out="$root/.dev-relay/pr-${name}-ci-${run}.log"
-  refuse_symlink "$root/.dev-relay" "$out"
-  ensure_out_dir "$root/.dev-relay"
+  ensure_pr_dir "$(git rev-parse --show-toplevel)" "ci-${run}.log"
+  out="$PR_DIR/ci-${run}.log"
   if ! gh_capture 60 "$TMPD/ci.log" run view "$run" -R "github.com/${P_REPO}" --log-failed; then
     echo "error: gh run view が失敗した:" >&2
     tail -n 5 "$TMPD/ci.log.err" >&2 || true
