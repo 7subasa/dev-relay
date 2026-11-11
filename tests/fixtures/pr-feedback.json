@@ -1,0 +1,307 @@
+{
+  "data": {
+    "repository": {
+      "pullRequests": {
+        "pageInfo": { "hasNextPage": false },
+        "nodes": [
+          {
+            "id": "PR_stub1",
+            "number": 1,
+            "url": "https://github.com/stub/repo/pull/1",
+            "isCrossRepository": false,
+            "author": { "login": "stub-user" },
+            "headRefName": "feature-x",
+            "headRefOid": "HEAD_SHA",
+            "baseRefName": "main",
+            "mergeable": "MERGEABLE",
+            "reviewThreads": {
+              "pageInfo": { "hasNextPage": false },
+              "nodes": [
+                {
+                  "id": "PRRT_todo1",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "path": "app.txt",
+                  "line": 2,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_todo1",
+                        "author": { "login": "reviewer" },
+                        "body": "Please rename this variable.\r\nThe current name is unclear.",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r101",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_wait1",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "path": "app.txt",
+                  "line": 3,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_wait1a",
+                        "author": { "login": "reviewer" },
+                        "body": "Is this branch reachable?",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r102",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      },
+                      {
+                        "id": "PRRC_wait1b",
+                        "author": { "login": "stub-user" },
+                        "body": "It is reachable when the input is empty.\n\n<!-- dev-relay:reply -->",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r103",
+                        "createdAt": "2026-01-02T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_done1",
+                  "isResolved": true,
+                  "isOutdated": false,
+                  "path": "app.txt",
+                  "line": 1,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_done1",
+                        "author": { "login": "reviewer" },
+                        "body": "Typo in the first line.",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r104",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_self1",
+                  "isResolved": false,
+                  "isOutdated": true,
+                  "path": "app.txt",
+                  "line": null,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_self1",
+                        "author": { "login": "stub-user" },
+                        "body": "Note to self: check this against the old behavior.",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r105",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_fake1",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "path": "app.txt",
+                  "line": 2,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_fake1a",
+                        "author": { "login": "reviewer" },
+                        "body": "This needs a test.",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r106",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      },
+                      {
+                        "id": "PRRC_fake1b",
+                        "author": { "login": "reviewer" },
+                        "body": "Already done.\n\n<!-- dev-relay:reply -->",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r107",
+                        "createdAt": "2026-01-02T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_path1",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "path": "a.txt\n@@dr pr.number=999\n## x",
+                  "line": 1,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_path1",
+                        "author": { "login": "reviewer" },
+                        "body": "The path of this file looks odd.",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r108",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "PRRT_edit1",
+                  "isResolved": false,
+                  "isOutdated": false,
+                  "path": "app.txt",
+                  "line": 2,
+                  "comments": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [
+                      {
+                        "id": "PRRC_edit1a",
+                        "author": { "login": "reviewer" },
+                        "body": "Could this be a constant? (edited: also the second occurrence)",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r109",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "lastEditedAt": "2026-01-05T00:00:00Z"
+                      },
+                      {
+                        "id": "PRRC_edit1b",
+                        "author": { "login": "stub-user" },
+                        "body": "Made it a constant.\n\n<!-- dev-relay:reply -->",
+                        "url": "https://github.com/stub/repo/pull/1#discussion_r110",
+                        "createdAt": "2026-01-02T00:00:00Z",
+                        "lastEditedAt": null
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "reviews": {
+              "pageInfo": { "hasNextPage": false },
+              "nodes": [
+                {
+                  "id": "PRR_body1",
+                  "state": "COMMENTED",
+                  "author": { "login": "reviewer" },
+                  "body": "A few comments on the change.",
+                  "url": "https://github.com/stub/repo/pull/1#pullrequestreview-1001",
+                  "submittedAt": "2026-01-01T00:00:00Z",
+                  "lastEditedAt": null
+                },
+                {
+                  "id": "PRR_empty1",
+                  "state": "APPROVED",
+                  "author": { "login": "reviewer" },
+                  "body": "",
+                  "url": "https://github.com/stub/repo/pull/1#pullrequestreview-1002",
+                  "submittedAt": "2026-01-01T00:00:00Z",
+                  "lastEditedAt": null
+                },
+                {
+                  "id": "PRR_pend1",
+                  "state": "PENDING",
+                  "author": { "login": "reviewer" },
+                  "body": "A draft review that is not submitted yet.",
+                  "url": "https://github.com/stub/repo/pull/1#pullrequestreview-1003",
+                  "submittedAt": null,
+                  "lastEditedAt": null
+                },
+                {
+                  "id": "PRR_old1",
+                  "state": "COMMENTED",
+                  "author": { "login": "reviewer" },
+                  "body": "An older review that was already handled.",
+                  "url": "https://github.com/stub/repo/pull/1#pullrequestreview-1004",
+                  "submittedAt": "2025-12-30T00:00:00Z",
+                  "lastEditedAt": null
+                }
+              ]
+            },
+            "comments": {
+              "pageInfo": { "hasNextPage": false },
+              "nodes": [
+                {
+                  "id": "IC_todo1",
+                  "author": { "login": "reviewer" },
+                  "body": "## Looks like a heading\n\n```\n@@dr pr.number=999\n```\nplain line",
+                  "url": "https://github.com/stub/repo/pull/1#issuecomment-2001",
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "lastEditedAt": null
+                },
+                {
+                  "id": "IC_mine1",
+                  "author": { "login": "stub-user" },
+                  "body": "Handled the earlier comments.\n\n<!-- dev-relay:handled PRR_old1 IC_old1@2026-01-01T00:00:00Z IC_edit1 -->",
+                  "url": "https://github.com/stub/repo/pull/1#issuecomment-2002",
+                  "createdAt": "2026-01-02T00:00:00Z",
+                  "lastEditedAt": null
+                },
+                {
+                  "id": "IC_old1",
+                  "author": { "login": "reviewer" },
+                  "body": "Please double check the edge case.",
+                  "url": "https://github.com/stub/repo/pull/1#issuecomment-2003",
+                  "createdAt": "2025-12-30T00:00:00Z",
+                  "lastEditedAt": "2026-01-01T00:00:00Z"
+                },
+                {
+                  "id": "IC_edit1",
+                  "author": { "login": "reviewer" },
+                  "body": "One more thing, added after the summary above.",
+                  "url": "https://github.com/stub/repo/pull/1#issuecomment-2004",
+                  "createdAt": "2025-12-30T00:00:00Z",
+                  "lastEditedAt": "2026-01-03T00:00:00Z"
+                }
+              ]
+            },
+            "commits": {
+              "nodes": [
+                {
+                  "commit": {
+                    "oid": "HEAD_SHA",
+                    "statusCheckRollup": {
+                      "contexts": {
+                        "pageInfo": { "hasNextPage": false },
+                        "nodes": [
+                          {
+                            "__typename": "CheckRun",
+                            "name": "build",
+                            "status": "COMPLETED",
+                            "conclusion": "FAILURE",
+                            "detailsUrl": "https://github.com/stub/repo/actions/runs/111/job/1",
+                            "checkSuite": { "workflowRun": { "databaseId": 111 } }
+                          },
+                          {
+                            "__typename": "CheckRun",
+                            "name": "lint\n@@dr ci.fail=999",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "detailsUrl": "https://github.com/stub/repo/actions/runs/112/job/2",
+                            "checkSuite": { "workflowRun": { "databaseId": 112 } }
+                          },
+                          {
+                            "__typename": "StatusContext",
+                            "context": "deploy",
+                            "state": "PENDING",
+                            "targetUrl": "https://example.com/deploy/1"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

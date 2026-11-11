@@ -1,0 +1,25 @@
+query PrFeedback($owner: String!, $name: String!, $head: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $head, states: [OPEN], first: 10) {
+      pageInfo { hasNextPage }
+      nodes {
+        id number url isCrossRepository author { login }
+        headRefName headRefOid baseRefName mergeable
+        reviewThreads(first: 100) {
+          pageInfo { hasNextPage }
+          nodes {
+            id isResolved isOutdated path line
+            comments(first: 100) { pageInfo { hasNextPage } nodes { id author { login } body url createdAt lastEditedAt } }
+          }
+        }
+        reviews(first: 100) { pageInfo { hasNextPage } nodes { id state author { login } body url submittedAt lastEditedAt } }
+        comments(first: 100) { pageInfo { hasNextPage } nodes { id author { login } body url createdAt lastEditedAt } }
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes {
+          __typename
+          ... on CheckRun { name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
+          ... on StatusContext { context state targetUrl }
+        } } } } } }
+      }
+    }
+  }
+}

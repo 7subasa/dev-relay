@@ -11,8 +11,15 @@
 #           STUB_GH_TITLES(gh pr list --state all の題。複数行でもよい),
 #           STUB_GH_BODY_COPY(gh pr create の --body-file をここへ写す), STUB_GH_TOKEN_SEEN(gh pr create が受けた GH_TOKEN をここへ書く),
 #           STUB_GH_CREATED_ANYWAY(1 で、作られたが応答は失敗した場面),
-#           STUB_GH_CREATE_EXIT, STUB_GH_URL(作った PR の URL)
-echo "gh $*" >> "${STUB_LOG:-/dev/null}"
+#           STUB_GH_CREATE_EXIT, STUB_GH_URL(作った PR の URL),
+#           STUB_GH_FEEDBACK_JSON(PrFeedback の応答の JSON のファイル。-q の式を jq -r で当てはめる。無ければ PR が1つも無い応答),
+#           STUB_GH_FEEDBACK_EXIT(PrFeedback の終了コード。0 以外なら何も出さない),
+#           STUB_GH_POSTS(ReplyThread と AddComment の記録のフォルダ。<連番>-<操作の名前>-<id>.md に -F body=@<ファイル> の中身を写す),
+#           STUB_GH_REPLY_FAIL(この id への ReplyThread は失敗), STUB_GH_COMMENT_EXIT(AddComment の終了コード),
+#           STUB_GH_RUN_LOG(gh run view --log-failed が出す文字列), STUB_GH_RUN_ATTEMPT(gh run view --json attempt の値。無ければ 1),
+#           STUB_GH_RERUN_EXIT(gh run rerun の終了コード)
+# 引数に改行を含む呼び出し（graphql の問い合わせ）も、STUB_LOG には1行で残す（改行は空白にする）
+printf 'gh %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >> "${STUB_LOG:-/dev/null}"
 
 # 引数 $1 の次の引数を出す。残りの引数から探す
 arg_after() {
@@ -26,6 +33,38 @@ arg_after() {
     prev="$a"
   done
   return 1
+}
+
+# 引数 $1 の名前のフィールド（-f / -F の次の key=値）の値を出す。残りの引数から探す
+field() {
+  local key="$1" prev="" a
+  shift
+  for a in "$@"; do
+    case "$prev" in
+      -f|-F|--raw-field|--field)
+        case "$a" in
+          "$key="*) printf '%s' "${a#"$key="}"; return 0 ;;
+        esac ;;
+    esac
+    prev="$a"
+  done
+  return 1
+}
+
+# 投稿の記録。引数: 操作の名前、id、gh の引数...。連番を出す
+record_post() {
+  local op="$1" id="$2" body seq=1
+  shift 2
+  if [ -n "${STUB_GH_POSTS:-}" ]; then
+    mkdir -p "$STUB_GH_POSTS"
+    seq=$(( $(ls "$STUB_GH_POSTS" | wc -l) + 1 ))
+    body="$(field body "$@" || true)"
+    case "$body" in
+      @*) cp "${body#@}" "$STUB_GH_POSTS/$seq-$op-$id.md" ;;
+      *) printf '%s\n' "$body" > "$STUB_GH_POSTS/$seq-$op-$id.md" ;;
+    esac
+  fi
+  echo "$seq"
 }
 
 has_arg() {
@@ -53,6 +92,41 @@ case "${1:-}" in
     fi
     exit 0 ;;
   api)
+    if has_arg graphql "$@"; then
+      q="$(field query "$@" || true)"
+      case "$q" in
+        *PrFeedback*)
+          if [ -n "${STUB_GH_FEEDBACK_EXIT:-}" ] && [ "$STUB_GH_FEEDBACK_EXIT" != "0" ]; then exit "$STUB_GH_FEEDBACK_EXIT"; fi
+          expr="$(arg_after -q "$@" || arg_after --jq "$@" || true)"
+          [ -n "$expr" ] || expr="."
+          if [ -n "${STUB_GH_FEEDBACK_JSON:-}" ]; then
+            jq -r "$expr" "$STUB_GH_FEEDBACK_JSON"
+          else
+            printf '%s\n' '{"data":{"repository":{"pullRequests":{"nodes":[]}}}}' | jq -r "$expr"
+          fi
+          exit $? ;;
+        *ReplyThread*)
+          id="$(field id "$@" || true)"
+          if [ -n "${STUB_GH_REPLY_FAIL:-}" ] && [ "$id" = "$STUB_GH_REPLY_FAIL" ]; then
+            echo "stub gh: ReplyThread が失敗した: $id" >&2
+            exit 1
+          fi
+          seq="$(record_post ReplyThread "$id" "$@")"
+          echo "https://github.com/stub/repo/pull/1#discussion_r$seq"
+          exit 0 ;;
+        *AddComment*)
+          if [ -n "${STUB_GH_COMMENT_EXIT:-}" ] && [ "$STUB_GH_COMMENT_EXIT" != "0" ]; then
+            echo "stub gh: AddComment が失敗した" >&2
+            exit "$STUB_GH_COMMENT_EXIT"
+          fi
+          id="$(field id "$@" || true)"
+          seq="$(record_post AddComment "$id" "$@")"
+          echo "https://github.com/stub/repo/pull/1#issuecomment-$seq"
+          exit 0 ;;
+      esac
+      echo "stub gh: 知らない graphql の操作: $*" >&2
+      exit 2
+    fi
     if [ -n "${STUB_GH_USER_EXIT:-}" ]; then exit "$STUB_GH_USER_EXIT"; fi
     echo "${STUB_GH_USER:-stub-user}"
     exit 0 ;;
@@ -65,6 +139,20 @@ case "${1:-}" in
     fi
     echo "${STUB_GH_BASE:-main} ${STUB_GH_FORK:-false}"
     exit 0 ;;
+  run)
+    case "${2:-}" in
+      view)
+        if has_arg --log-failed "$@"; then
+          if [ -n "${STUB_GH_RUN_LOG:-}" ]; then printf '%s\n' "$STUB_GH_RUN_LOG"; fi
+          exit 0
+        fi
+        if has_arg --json "$@"; then
+          echo "${STUB_GH_RUN_ATTEMPT:-1}"
+          exit 0
+        fi ;;
+      rerun)
+        exit "${STUB_GH_RERUN_EXIT:-0}" ;;
+    esac ;;
   pr)
     case "${2:-}" in
       list)

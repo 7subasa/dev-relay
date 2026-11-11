@@ -34,6 +34,10 @@ usage() {
                 本文の形と、手元のパスや秘密の混入を調べる
   pr create --title S --body-file FILE [--base BRANCH] [--draft] [--no-sections] (--dry-run | --confirm VALUE)
                 確認の値を出す（--dry-run）、または確認の値を受けて push と PR の作成をする（--confirm）
+  pr feedback                   自分の PR に付いたレビューと CI を一覧にし、対応の前提を確かめる
+  pr ci-log RUN_ID              CI の失敗したステップのログを保存する
+  pr respond --plan FILE (--dry-run | --confirm VALUE)
+                計画どおりに push・返信・まとめのコメント・CI の再実行をする（--dry-run が確認の値を出す）
 
 各サブコマンドの詳細は dev-relay <サブコマンド> --help。
 EOF
@@ -45,7 +49,11 @@ case "${1:-}" in
   doctor) shift; exec bash "$DEV_RELAY_ROOT/scripts/doctor.sh" "$@" ;;
   config) shift; exec bash "$DEV_RELAY_ROOT/scripts/config.sh" "$@" ;;
   refresh) shift; exec bash "$DEV_RELAY_ROOT/scripts/refresh.sh" "$@" ;;
-  pr) shift; exec bash "$DEV_RELAY_ROOT/scripts/pr.sh" "$@" ;;
+  pr) shift
+    case "${1:-}" in
+      feedback|ci-log|respond) exec bash "$DEV_RELAY_ROOT/scripts/pr-respond.sh" "$@" ;;
+      *) exec bash "$DEV_RELAY_ROOT/scripts/pr.sh" "$@" ;;
+    esac ;;
   smoke) shift; exec bash "$DEV_RELAY_ROOT/scripts/smoke.sh" "$@" ;;
   *) echo "error: 知らないサブコマンドです: $1" >&2; usage >&2; exit 1 ;;
 esac

@@ -10,6 +10,12 @@
 #   gh pr list -R github.com/<OWNER/REPO> --head <ブランチ> --state open --limit 100 --json url,isCrossRepository -q '...'
 #   gh pr list -R github.com/<OWNER/REPO> --state all --limit 5 --json title -q '.[].title'
 #   gh pr create -R github.com/<OWNER/REPO> --base <ベース> --head <ブランチ> --title <題> --body-file <ファイル> [--draft]
+#   gh api --hostname github.com graphql -f query=<pr-feedback.graphql の問い合わせ> -f owner=<OWNER> -f name=<REPO> -f head=<ブランチ> -q <pr-feedback.jq の式>
+#   gh api --hostname github.com graphql -f query=<pr-reply.graphql の ReplyThread> -f id=<スレッドの id> -F body=@<ファイル> -q .data.addPullRequestReviewThreadReply.comment.url
+#   gh api --hostname github.com graphql -f query=<pr-comment.graphql の AddComment> -f id=<PR の id> -F body=@<ファイル> -q .data.addComment.commentEdge.node.url
+#   gh run view <run-id> -R github.com/<OWNER/REPO> --log-failed
+#   gh run view <run-id> -R github.com/<OWNER/REPO> --json attempt -q .attempt
+#   gh run rerun <run-id> -R github.com/<OWNER/REPO> --failed
 
 # gh の状態を調べ、TOOL_GH に ok / not-installed / not-logged-in を入れる。
 # 有無だけを見るので、トークンの更新（通信）はさせない。$(...) の中で呼ばない。
