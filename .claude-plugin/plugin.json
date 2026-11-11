@@ -1,0 +1,8 @@
+{
+  "name": "dev-relay",
+  "description": "設計・実装・レビューを別々のモデルに分担させる開発ワークフロー。レビュアーは Codex CLI・Cursor CLI・Claude から環境に合わせて選ばれ、指摘は再現できたものだけ採用する。",
+  "author": { "name": "mk-edu", "url": "https://github.com/mk-edu" },
+  "homepage": "https://github.com/mk-edu/dev-relay",
+  "repository": "https://github.com/mk-edu/dev-relay",
+  "license": "MIT"
+}

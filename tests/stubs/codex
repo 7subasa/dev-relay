@@ -1,0 +1,46 @@
+#!/bin/bash
+# tests/run.sh 用の偽の codex。本物のモデルは呼ばない。
+# 環境変数: STUB_LOG, STUB_STDIN, STUB_CODEX_LOGIN(1 で未ログイン), STUB_CODEX_SLEEP,
+#           STUB_CODEX_BODY, STUB_CODEX_EXIT
+echo "codex $*" >> "${STUB_LOG:-/dev/null}"
+
+case "${1:-}" in
+  --help)
+    echo "Usage: codex [OPTIONS] [COMMAND]"
+    echo "      --no-daemon  Run without the shared background server"
+    exit 0 ;;
+  --version)
+    echo "codex-cli 0.0.0-stub"
+    exit 0 ;;
+  login)
+    if [ "${STUB_CODEX_LOGIN:-0}" = "1" ]; then
+      echo "Not logged in" >&2
+      exit 1
+    fi
+    echo "Logged in using ChatGPT (stub)"
+    exit 0 ;;
+esac
+
+# それ以外は実行とみなす
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+cat > "${STUB_STDIN:-/dev/null}"
+
+if [ -n "${STUB_CODEX_SLEEP:-}" ]; then
+  # 期限を受けたら、待っている sleep も一緒に止めて戻る。
+  # timeout は TERM（終了コード 143）、perl の alarm は ALRM（終了コード 142）で止める
+  trap 'kill "$sp" 2>/dev/null; exit 143' TERM
+  trap 'kill "$sp" 2>/dev/null; exit 142' ALRM
+  sleep "$STUB_CODEX_SLEEP" &
+  sp=$!
+  wait "$sp"
+fi
+
+if [ -n "$out" ]; then
+  printf '%s\n' "${STUB_CODEX_BODY:-stub codex review body}" > "$out"
+fi
+exit "${STUB_CODEX_EXIT:-0}"

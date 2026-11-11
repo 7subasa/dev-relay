@@ -1,0 +1,11 @@
+{
+  "name": "dev-relay",
+  "owner": { "name": "mk-edu" },
+  "plugins": [
+    {
+      "name": "dev-relay",
+      "source": "./",
+      "description": "設計・実装・レビューを別々のモデルに分担させる開発ワークフロー。"
+    }
+  ]
+}

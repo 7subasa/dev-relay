@@ -1,0 +1,47 @@
+#!/bin/bash
+# tests/run.sh 用の偽の cursor-agent。本物のモデルは呼ばない。
+# 環境変数: STUB_LOG, STUB_STDIN, STUB_CURSOR_LOGIN(1 で未ログイン。終了コードは 0 のまま),
+#           STUB_CURSOR_ACTION(create:<名前> append:<名前> restage:<名前> crlf:<名前> chmod:<名前>),
+#           STUB_CURSOR_IS_ERROR(1 で is_error=true), STUB_CURSOR_EXIT
+echo "cursor-agent $*" >> "${STUB_LOG:-/dev/null}"
+
+case "${1:-}" in
+  --version)
+    echo "2026.11.10-stub"
+    exit 0 ;;
+  status)
+    # 本物と同じく、未ログインでも終了コードは 0
+    if [ "${STUB_CURSOR_LOGIN:-0}" = "1" ]; then
+      echo "Not logged in"
+    else
+      echo "✓ Logged in as stub"
+    fi
+    exit 0 ;;
+esac
+
+# それ以外は実行とみなす
+workspace=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--workspace" ]; then workspace="$a"; fi
+  prev="$a"
+done
+cat > "${STUB_STDIN:-/dev/null}"
+
+action="${STUB_CURSOR_ACTION:-}"
+if [ -n "$action" ] && [ -n "$workspace" ]; then
+  cd "$workspace" || exit 1
+  name="${action#*:}"
+  case "${action%%:*}" in
+    create)  echo "created by stub" > "$name" ;;
+    append)  echo "appended by stub" >> "$name" ;;
+    restage) echo "rewritten by stub" >> "$name"; git add "$name" ;;
+    crlf)    perl -pi -e 's/\n/\r\n/' "$name" ;;
+    chmod)   chmod +x "$name" ;;
+  esac
+fi
+
+is_error=false
+if [ "${STUB_CURSOR_IS_ERROR:-0}" = "1" ]; then is_error=true; fi
+printf '{"type":"result","subtype":"success","is_error":%s,"duration_ms":1234,"result":"stub cursor review body","usage":{"inputTokens":111,"outputTokens":22,"cacheReadTokens":333,"cacheWriteTokens":4}}\n' "$is_error"
+exit "${STUB_CURSOR_EXIT:-0}"

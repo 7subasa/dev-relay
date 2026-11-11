@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# dev-relay の入口。サブコマンドごとに scripts/ のスクリプトを呼ぶ。
+set -euo pipefail
+
+DEV_RELAY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export DEV_RELAY_ROOT
+
+usage() {
+  cat <<'EOF'
+使い方: dev-relay <サブコマンド> [引数...]
+
+  review design <設計書> [--focus S] [--repo DIR] [--reviewer ID] [--model M] [--effort E] [--out FILE] [--dry-run]
+  review code [--uncommitted | --base BRANCH | --commit SHA] [--intent S] [--design FILE]
+              [--focus S] [--repo DIR] [--extra [--exclude ID]] [--reviewer ID]
+              [--model M] [--effort E] [--out FILE] [--dry-run]
+                設計書または差分を、選ばれたレビュアーにレビューさせる
+  doctor        道具の状態、設定、役割ごとに選ばれるレビュアーを表示する
+  config metered [off|auto]
+  config vendors [--user <一覧|none|ask> | --repo <一覧|none> | --repo --reset]
+                利用者の設定を表示・変更する
+
+各サブコマンドの詳細は dev-relay <サブコマンド> --help。
+EOF
+}
+
+case "${1:-}" in
+  ""|-h|--help) usage; exit 0 ;;
+  review) shift; exec bash "$DEV_RELAY_ROOT/scripts/review.sh" "$@" ;;
+  doctor) shift; exec bash "$DEV_RELAY_ROOT/scripts/doctor.sh" "$@" ;;
+  config) shift; exec bash "$DEV_RELAY_ROOT/scripts/config.sh" "$@" ;;
+  *) echo "error: 知らないサブコマンドです: $1" >&2; usage >&2; exit 1 ;;
+esac
