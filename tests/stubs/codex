@@ -1,7 +1,8 @@
 #!/bin/bash
 # tests/run.sh 用の偽の codex。本物のモデルは呼ばない。
 # 環境変数: STUB_LOG, STUB_STDIN, STUB_CODEX_LOGIN(1 で未ログイン), STUB_CODEX_SLEEP,
-#           STUB_CODEX_BODY, STUB_CODEX_EXIT
+#           STUB_CODEX_BODY, STUB_CODEX_EXIT, STUB_CODEX_VERSION, STUB_VERSION_SLEEP(--version を待たせる秒数),
+#           STUB_VERSION_IGNORE(--version が TERM と ALRM を無視して待つ秒数), STUB_VERSION_ORPHAN(--version が、標準出力を持ったまま残る sleep を起動して待つ秒数)
 echo "codex $*" >> "${STUB_LOG:-/dev/null}"
 
 case "${1:-}" in
@@ -10,7 +11,25 @@ case "${1:-}" in
     echo "      --no-daemon  Run without the shared background server"
     exit 0 ;;
   --version)
-    echo "codex-cli 0.0.0-stub"
+    if [ -n "${STUB_VERSION_ORPHAN:-}" ]; then
+      # 標準出力を持ったまま残る子を作る。trap は置かないので、止められても sleep は残る
+      sleep "$STUB_VERSION_ORPHAN" &
+      wait
+    fi
+    if [ -n "${STUB_VERSION_IGNORE:-}" ]; then
+      # TERM と ALRM を無視して待つ（期限を付ける道具が KILL まで進むかを確かめる）
+      trap '' TERM ALRM
+      sleep "$STUB_VERSION_IGNORE"
+    fi
+    if [ -n "${STUB_VERSION_SLEEP:-}" ]; then
+      # 期限を受けたら、待っている sleep も一緒に止めて戻る（下の STUB_CODEX_SLEEP と同じ）
+      trap 'kill "$sp" 2>/dev/null; exit 143' TERM
+      trap 'kill "$sp" 2>/dev/null; exit 142' ALRM
+      sleep "$STUB_VERSION_SLEEP" &
+      sp=$!
+      wait "$sp"
+    fi
+    echo "${STUB_CODEX_VERSION:-codex-cli 0.0.0-stub}"
     exit 0 ;;
   login)
     if [ "${STUB_CODEX_LOGIN:-0}" = "1" ]; then

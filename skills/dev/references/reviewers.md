@@ -6,6 +6,14 @@
 
 役割ごとの候補の一覧が、プラグインの `config/roles/` にある（`design-review.conf`、`code-review.conf`、`code-review-extra.conf`）。上にある候補ほど優先する。スクリプトは候補を上から順に見て、使えない理由が1つも無い最初の候補を選ぶ。
 
+役割の候補は、手元で上書きできる（`dev-relay config role`）。上書きがあれば、プラグインの一覧の代わりにそちらを読む。今どちらを読んでいるかは、`dev-relay doctor` の `role.<役割>.source`（`default` / `override`）で分かる。上書きのときは `role.<役割>.override`（`current` / `stale`）も出る。`stale` は、上書きを作ったあとに、プラグインの既定の一覧が変わったという意味。
+
+上書きを書くときに守ること。
+
+- 同じ id は、どの役割でも同じ定義を指す。別の役割で違う定義に同じ id を使うと、エラーになる。追加のレビュアーの除外や `--reviewer` が、id だけで候補を見分けているため。
+- backend が `claude` の候補は、model と effort を `-` にする。Claude のレビュアーは決まったエージェントで動き、model を渡す経路が無い。
+- `vendors` には、実際の送り先を書く。backend や model から分かる提供元が `vendors` に無い行は、エラーになる。
+
 使えない理由は、次のとおり。
 
 | 理由 | 意味 |

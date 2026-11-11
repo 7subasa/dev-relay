@@ -22,6 +22,13 @@
 | `cursor-not-logged-in` | `dev-relay doctor` の `skipped` に出る。`cursor-agent login` を案内する（自動化では `CURSOR_API_KEY`）。ログイン済みなのに出るときは、`cursor-agent status` の出力に `Logged in` が含まれるかを確かめる（`cursor-cli.md`） |
 | `vendor-not-allowed:<名前>` | 候補の送り先が、許可されていない。意図どおりなら何もしない（許可された候補か、Claude で進む）。使いたいときは、`/dev-relay:setup` か `dev-relay config vendors --repo <一覧>`（このリポジトリ）、`dev-relay config vendors --user <一覧>`（利用者の既定）で許可する。今の値と出どころは `dev-relay config vendors` で見られる |
 
+## 役割の上書き
+
+| 症状 | 原因と対処 |
+|---|---|
+| エラーにファイル名と行番号が出て、レビューや `doctor` が止まる | 上書きのファイル（設定フォルダの `roles/<役割>.conf`）の、その行が壊れている。列の数や値の誤りのほか、backend と `vendors` の食い違い（例: backend が `codex` なのに `vendors` に `openai` が無い）でも出る。ファイルのその行を直す。直せないときは `dev-relay config role <役割> --reset` で、プラグインの既定の一覧に戻す |
+| `dev-relay config role <役割> --from <ファイル>` が失敗する | 渡したファイルが同じ検査で落ちている。エラーのファイル名と行番号を見て、ファイルを直してから、もう一度実行する。失敗したときは、上書きは作られない |
+
 ## レビューの質
 
 | 症状 | 原因と対処 |

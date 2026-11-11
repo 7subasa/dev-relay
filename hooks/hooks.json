@@ -1,0 +1,17 @@
+{
+  "description": "CLI の版が変わったときなどに、セッションの開始時に1行知らせる",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/dev-relay refresh notice --hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

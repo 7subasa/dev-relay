@@ -2,13 +2,45 @@
 # tests/run.sh 用の偽の cursor-agent。本物のモデルは呼ばない。
 # 環境変数: STUB_LOG, STUB_STDIN, STUB_CURSOR_LOGIN(1 で未ログイン。終了コードは 0 のまま),
 #           STUB_CURSOR_ACTION(create:<名前> append:<名前> restage:<名前> crlf:<名前> chmod:<名前>),
-#           STUB_CURSOR_IS_ERROR(1 で is_error=true), STUB_CURSOR_EXIT
+#           STUB_CURSOR_IS_ERROR(1 で is_error=true), STUB_CURSOR_EXIT, STUB_CURSOR_BODY(result の本文),
+#           STUB_CURSOR_VERSION, STUB_VERSION_SLEEP(--version を待たせる秒数),
+#           STUB_VERSION_IGNORE(--version が TERM と ALRM を無視して待つ秒数), STUB_VERSION_ORPHAN(--version が、標準出力を持ったまま残る sleep を起動して待つ秒数),
+#           STUB_CURSOR_MODELS(models の行), STUB_CURSOR_MODELS_EXIT(models の終了コード)
 echo "cursor-agent $*" >> "${STUB_LOG:-/dev/null}"
 
 case "${1:-}" in
   --version)
-    echo "2026.11.10-stub"
+    if [ -n "${STUB_VERSION_ORPHAN:-}" ]; then
+      # 標準出力を持ったまま残る子を作る。trap は置かないので、止められても sleep は残る
+      sleep "$STUB_VERSION_ORPHAN" &
+      wait
+    fi
+    if [ -n "${STUB_VERSION_IGNORE:-}" ]; then
+      # TERM と ALRM を無視して待つ（期限を付ける道具が KILL まで進むかを確かめる）
+      trap '' TERM ALRM
+      sleep "$STUB_VERSION_IGNORE"
+    fi
+    if [ -n "${STUB_VERSION_SLEEP:-}" ]; then
+      # 期限を受けたら、待っている sleep も一緒に止めて戻る
+      trap 'kill "$sp" 2>/dev/null; exit 143' TERM
+      trap 'kill "$sp" 2>/dev/null; exit 142' ALRM
+      sleep "$STUB_VERSION_SLEEP" &
+      sp=$!
+      wait "$sp"
+    fi
+    echo "${STUB_CURSOR_VERSION:-2026.11.10-stub}"
     exit 0 ;;
+  models)
+    echo "Available models"
+    echo
+    if [ -n "${STUB_CURSOR_MODELS:-}" ]; then
+      printf '%s\n' "$STUB_CURSOR_MODELS"
+    else
+      echo "auto - Auto (default)"
+      echo "grok-4.7-high - Grok 4.7 High"
+      echo "gemini-4-carbon-medium - Gemini 4 Carbon Medium"
+    fi
+    exit "${STUB_CURSOR_MODELS_EXIT:-0}" ;;
   status)
     # 本物と同じく、未ログインでも終了コードは 0
     if [ "${STUB_CURSOR_LOGIN:-0}" = "1" ]; then
@@ -33,7 +65,7 @@ if [ -n "$action" ] && [ -n "$workspace" ]; then
   cd "$workspace" || exit 1
   name="${action#*:}"
   case "${action%%:*}" in
-    create)  echo "created by stub" > "$name" ;;
+    create)  mkdir -p "$(dirname "$name")"; echo "created by stub" > "$name" ;;
     append)  echo "appended by stub" >> "$name" ;;
     restage) echo "rewritten by stub" >> "$name"; git add "$name" ;;
     crlf)    perl -pi -e 's/\n/\r\n/' "$name" ;;
@@ -43,5 +75,7 @@ fi
 
 is_error=false
 if [ "${STUB_CURSOR_IS_ERROR:-0}" = "1" ]; then is_error=true; fi
-printf '{"type":"result","subtype":"success","is_error":%s,"duration_ms":1234,"result":"stub cursor review body","usage":{"inputTokens":111,"outputTokens":22,"cacheReadTokens":333,"cacheWriteTokens":4}}\n' "$is_error"
+# 本文は複数行でも正しい JSON になるよう、jq で文字列にする（Cursor のレビューは、もともと jq が要る）
+body_json="$(printf '%s' "${STUB_CURSOR_BODY:-stub cursor review body}" | jq -Rs .)"
+printf '{"type":"result","subtype":"success","is_error":%s,"duration_ms":1234,"result":%s,"usage":{"inputTokens":111,"outputTokens":22,"cacheReadTokens":333,"cacheWriteTokens":4}}\n' "$is_error" "$body_json"
 exit "${STUB_CURSOR_EXIT:-0}"

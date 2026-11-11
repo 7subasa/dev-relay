@@ -62,19 +62,37 @@ have_timeout_tool() {
 }
 
 # 期限を付けてコマンドを実行する。timeout、gtimeout、perl の順に、あるものを使う。
-# perl の alarm で終わったときの終了コード 142 は 124 に読み替える。
+# 期限が来たら TERM を送り、1秒たっても終わらなければ KILL する（TERM を無視する子も止める）。
+# 期限で終わったときの終了コードは 124 にそろえる（KILL で終わった 137 も 124 にする）。
 # 3つとも無いときは期限なしで実行する（review.sh は CLI を呼ぶ前に have_timeout_tool で止める）。
 # 引数: 秒 コマンド...
 run_with_timeout() {
   local sec="$1" st=0
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$sec" "$@" || st=$?
+    timeout -k 1 "$sec" "$@" || st=$?
+    if [ "$st" -eq 137 ]; then st=124; fi
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$sec" "$@" || st=$?
+    gtimeout -k 1 "$sec" "$@" || st=$?
+    if [ "$st" -eq 137 ]; then st=124; fi
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' "$sec" "$@" || st=$?
-    if [ "$st" -eq 142 ]; then st=124; fi
+    perl -e '
+      use POSIX ":sys_wait_h";
+      my $sec = shift;
+      my $pid = fork;
+      exit 127 unless defined $pid;
+      if ($pid == 0) { exec @ARGV; exit 127; }
+      $SIG{ALRM} = sub {
+        kill "TERM", $pid;
+        for (1 .. 10) { exit 124 if waitpid($pid, WNOHANG) > 0; select(undef, undef, undef, 0.1); }
+        kill "KILL", $pid;
+        waitpid($pid, 0);
+        exit 124;
+      };
+      alarm $sec;
+      waitpid($pid, 0);
+      exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+    ' "$sec" "$@" || st=$?
   else
     "$@" || st=$?
   fi

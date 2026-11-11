@@ -105,3 +105,7 @@ Cursor CLI が使えるとき（`tool.cursor=ok` かつ `tool.jq=ok`）だけ行
 - `role.design-review`、`role.code-review`、`role.code-review-extra` の値と、それぞれの `skipped` を表にする。
 - 理由が `vendor-not-allowed` なら、手順4か5の答えで許可していない提供元があるということ。意図どおりかを利用者に確かめてもらう。
 - 変えたいときは、`/dev-relay:setup` をもう一度実行するか、`dev-relay config` を直接使う。設定はプラグインの外に保存されるので、プラグインを更新しても消えない。
+
+最後に、`dev-relay refresh save` を実行して、今の状態（CLI の版、モデルの一覧）を記録する。
+
+通知について、利用者に1〜2文で伝える。CLI の版が変わったときや、前回の確認から30日たったときに、セッションの開始時に1行知らせる。`/dev-relay:refresh` で確認すると止まる。通知そのものを止めたいときは `dev-relay config notice off`。

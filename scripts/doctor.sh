@@ -18,11 +18,11 @@ load_vendors
 
 echo "tool.codex=${TOOL_CODEX}"
 if [ "$TOOL_CODEX" != "not-installed" ]; then
-  echo "tool.codex.version=$(run_with_timeout 10 codex --version 2>/dev/null | head -n 1 || true)"
+  echo "tool.codex.version=$(tool_version codex || true)"
 fi
 echo "tool.cursor=${TOOL_CURSOR}"
 if [ "$TOOL_CURSOR" != "not-installed" ]; then
-  echo "tool.cursor.version=$(run_with_timeout 10 cursor-agent --version 2>/dev/null | head -n 1 || true)"
+  echo "tool.cursor.version=$(tool_version cursor || true)"
 fi
 echo "tool.jq=${TOOL_JQ}"
 echo "tool.herdr=${TOOL_HERDR}"
@@ -41,6 +41,7 @@ fi
 
 echo "config.dir=$(config_dir)"
 echo "config.metered=$(config_get metered off)"
+echo "config.notice=$(config_get notice on)"
 echo "config.vendors=${VENDORS_USER}"
 echo "repo.vendors=${VENDORS_ALLOWED:-none}"
 echo "repo.vendors.source=${VENDORS_SOURCE}"
@@ -53,6 +54,10 @@ report_role() {
   else
     echo "role.${role}=none"
     echo "role.${role}.backend=none"
+  fi
+  echo "role.${role}.source=$(role_source "$role")"
+  if [ "$(role_source "$role")" = "override" ]; then
+    echo "role.${role}.override=$(role_override_state "$role")"
   fi
   echo "role.${role}.skipped=${R_SKIPPED}"
 }
