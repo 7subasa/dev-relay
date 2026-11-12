@@ -16,8 +16,10 @@ def btxt: (.body // "") | split("\r") | join("");
 def ver: if (.lastEditedAt // "") == "" then .id else "\(.id)@\(.lastEditedAt)" end;
 def nonblank: test("\\S");
 def trimend: if length > 0 and .[-1] == "" then .[:-1] | trimend else . end;
+# 行のための制御文字の直し。0x00-0x08、0x0b-0x1f、0x7f を ? に直す。タブ（0x09）は、本文の字下げを壊さないよう残す
+def qline: explode | map(if (. < 32 and . != 9) or . == 127 then 63 else . end) | implode;
 # 本文の各行の頭に > を付ける（空の行は >）
-def quote: split("\n") | trimend | (if length == 0 then [""] else . end) | map(if . == "" then ">" else "> " + . end) | .[];
+def quote: split("\n") | trimend | (if length == 0 then [""] else . end) | map(qline | if . == "" then ">" else "> " + . end) | .[];
 
 # スレッドの状態。最後のコメントが本人の dev-relay の返信で、ほかのコメントが返信のあとに編集されていなければ waiting
 def tstate:

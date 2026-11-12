@@ -19,7 +19,7 @@ usage() {
   refresh save                  今の状態を記録し、確認した日を今日にする
   refresh notice [--hook]       知らせることがあれば1行表示する（SessionStart のフックが呼ぶ）
   work dir <topic>              作業のフォルダ（.dev-relay/<topic>/ と review/ impl/ logs/）を作り、パスを表示する
-  work done <topic | pr/<n>>    終わった作業を .dev-relay/done/ に移す
+  work done <topic | pr/<n> | pr-review/<番号>>    終わった作業を .dev-relay/done/ に移す
   smoke [--reviewer ID]... [--vendors <一覧|none>]
                 本物のレビュアーを作り物の差分に対して動かし、出力形式を確かめる
   smoke check <結果ファイル>    結果ファイルが出力形式どおりかを調べる
@@ -40,6 +40,11 @@ usage() {
   pr ci-log RUN_ID              CI の失敗したステップのログを保存する
   pr respond --plan FILE (--dry-run | --confirm VALUE)
                 計画どおりに push・返信・まとめのコメント・CI の再実行をする（--dry-run が確認の値を出す）
+  pr inbox                      今のリポジトリで、自分にレビュー依頼が来ている PR と、自分の PR の状態を一覧にする
+  pr review fetch NUMBER        PR の情報を取り出し、先頭を別の worktree に取り出す
+  pr review post NUMBER --plan FILE (--dry-run | --confirm VALUE)
+                レビュー（コメント）を投稿する（--dry-run が確認の値を出す）
+  pr review clean NUMBER        取り出した worktree と参照を消す
 
 各サブコマンドの詳細は dev-relay <サブコマンド> --help。
 EOF
@@ -54,6 +59,7 @@ case "${1:-}" in
   pr) shift
     case "${1:-}" in
       feedback|ci-log|respond) exec bash "$DEV_RELAY_ROOT/scripts/pr-respond.sh" "$@" ;;
+      inbox|review) exec bash "$DEV_RELAY_ROOT/scripts/pr-review.sh" "$@" ;;
       *) exec bash "$DEV_RELAY_ROOT/scripts/pr.sh" "$@" ;;
     esac ;;
   work) shift; exec bash "$DEV_RELAY_ROOT/scripts/work.sh" "$@" ;;

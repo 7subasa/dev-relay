@@ -17,7 +17,16 @@
 #           STUB_GH_POSTS(ReplyThread と AddComment の記録のフォルダ。<連番>-<操作の名前>-<id>.md に -F body=@<ファイル> の中身を写す),
 #           STUB_GH_REPLY_FAIL(この id への ReplyThread は失敗), STUB_GH_COMMENT_EXIT(AddComment の終了コード),
 #           STUB_GH_RUN_LOG(gh run view --log-failed が出す文字列), STUB_GH_RUN_ATTEMPT(gh run view --json attempt の値。無ければ 1),
-#           STUB_GH_RERUN_EXIT(gh run rerun の終了コード)
+#           STUB_GH_RERUN_EXIT(gh run rerun の終了コード),
+#           STUB_GH_INBOX_JSON(PrInbox の応答の JSON のファイル。-q の式を jq -r で当てはめる。無ければ、どちらも0件の応答),
+#           STUB_GH_INBOX_EXIT(PrInbox の終了コード。0 以外なら何も出さない),
+#           STUB_GH_REVIEW_JSON(PrReview の応答の JSON のファイル。-q の式を jq -r で当てはめる。無ければ、標準エラーに1行出して終了コード 1),
+#           STUB_GH_REVIEW_JSON_AFTER(あれば、AddReview が1度でも呼ばれたあとの PrReview は、こちらのファイルを使う),
+#           STUB_GH_REVIEW_EXIT(PrReview の終了コード。0 以外なら何も出さない), STUB_GH_REVIEW_EXIT_AFTER(AddReview が呼ばれたあとの PrReview の終了コード),
+#           STUB_GH_ADDREVIEW_EXIT(AddReview の終了コード。0 以外なら、記録だけして、標準エラーに1行出す)
+#           STUB_GH_POSTS には AddReview も記録する: <連番>-AddReview-<id>.md に body の中身、<連番>-AddReview-<id>.fields に
+#           query と body 以外のフィールドを渡された順に key=値 で1行ずつ（値が -F / --field の @<ファイル> のときは、中身を <連番>-AddReview-<id>.<key>.md に写し、行は key=@<そのファイル名>。
+#           -f / --raw-field の @<ファイル> は本物の gh と同じく展開せず、行は key=@<ファイルのパス> のまま。body も同じで、-f のときは @<ファイルのパス> という文字列を記録する）
 # 引数に改行を含む呼び出し（graphql の問い合わせ）も、STUB_LOG には1行で残す（改行は空白にする）
 printf 'gh %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >> "${STUB_LOG:-/dev/null}"
 
@@ -51,20 +60,69 @@ field() {
   return 1
 }
 
+# 引数 $1 の名前のフィールドを渡したフラグ（-f / -F / --raw-field / --field）を出す。残りの引数から探す
+field_flag() {
+  local key="$1" prev="" a
+  shift
+  for a in "$@"; do
+    case "$prev" in
+      -f|-F|--raw-field|--field)
+        case "$a" in
+          "$key="*) printf '%s' "$prev"; return 0 ;;
+        esac ;;
+    esac
+    prev="$a"
+  done
+  return 1
+}
+
+# 値を @ファイル として読むフラグか。本物の gh は -F / --field のときだけ読み、-f / --raw-field は @ のまま送る
+reads_file() { case "$1" in -F|--field) return 0 ;; *) return 1 ;; esac; }
+
 # 投稿の記録。引数: 操作の名前、id、gh の引数...。連番を出す
 record_post() {
-  local op="$1" id="$2" body seq=1
+  local op="$1" id="$2" body flag seq=1
   shift 2
   if [ -n "${STUB_GH_POSTS:-}" ]; then
     mkdir -p "$STUB_GH_POSTS"
-    seq=$(( $(ls "$STUB_GH_POSTS" | wc -l) + 1 ))
+    seq=$(( $(ls "$STUB_GH_POSTS" | grep -cE '^[0-9]+-[A-Za-z]+-[^.]+\.md$' || true) + 1 ))
     body="$(field body "$@" || true)"
+    flag="$(field_flag body "$@" || true)"
     case "$body" in
-      @*) cp "${body#@}" "$STUB_GH_POSTS/$seq-$op-$id.md" ;;
+      @*) if reads_file "$flag"; then cp "${body#@}" "$STUB_GH_POSTS/$seq-$op-$id.md"; else printf '%s\n' "$body" > "$STUB_GH_POSTS/$seq-$op-$id.md"; fi ;;
       *) printf '%s\n' "$body" > "$STUB_GH_POSTS/$seq-$op-$id.md" ;;
     esac
   fi
   echo "$seq"
+}
+
+# AddReview の、body と query 以外のフィールドの記録。引数: 連番、id、gh の引数...
+record_addreview_fields() {
+  local seq="$1" id="$2" prev="" a key val base
+  shift 2
+  base="$STUB_GH_POSTS/$seq-AddReview-$id"
+  : > "$base.fields"
+  for a in "$@"; do
+    case "$prev" in
+      -f|-F|--raw-field|--field)
+        key="${a%%=*}"
+        val="${a#*=}"
+        case "$key" in
+          query|body) ;;
+          *)
+            case "$val" in
+              @*)
+                if reads_file "$prev"; then
+                  cp "${val#@}" "$base.$key.md"; printf '%s=@%s\n' "$key" "$(basename "$base.$key.md")" >> "$base.fields"
+                else
+                  printf '%s=%s\n' "$key" "$val" >> "$base.fields"
+                fi ;;
+              *) printf '%s=%s\n' "$key" "$val" >> "$base.fields" ;;
+            esac ;;
+        esac ;;
+    esac
+    prev="$a"
+  done
 }
 
 has_arg() {
@@ -95,6 +153,42 @@ case "${1:-}" in
     if has_arg graphql "$@"; then
       q="$(field query "$@" || true)"
       case "$q" in
+        *AddReview*)
+          id="$(field id "$@" || true)"
+          seq="$(record_post AddReview "$id" "$@")"
+          if [ -n "${STUB_GH_POSTS:-}" ]; then record_addreview_fields "$seq" "$id" "$@"; fi
+          if [ -n "${STUB_GH_ADDREVIEW_EXIT:-}" ] && [ "$STUB_GH_ADDREVIEW_EXIT" != "0" ]; then
+            echo "stub gh: AddReview が失敗した" >&2
+            exit "$STUB_GH_ADDREVIEW_EXIT"
+          fi
+          echo "https://github.com/stub/repo/pull/7#pullrequestreview-$seq"
+          exit 0 ;;
+        *PrReview*)
+          expr="$(arg_after -q "$@" || arg_after --jq "$@" || true)"
+          [ -n "$expr" ] || expr="."
+          after=""
+          if grep -q 'mutation AddReview(' "${STUB_LOG:-/dev/null}" 2>/dev/null; then after=1; fi
+          code="${STUB_GH_REVIEW_EXIT:-0}"
+          if [ -n "$after" ] && [ -n "${STUB_GH_REVIEW_EXIT_AFTER:-}" ]; then code="$STUB_GH_REVIEW_EXIT_AFTER"; fi
+          if [ "$code" != "0" ]; then exit "$code"; fi
+          file="${STUB_GH_REVIEW_JSON:-}"
+          if [ -n "$after" ] && [ -n "${STUB_GH_REVIEW_JSON_AFTER:-}" ]; then file="$STUB_GH_REVIEW_JSON_AFTER"; fi
+          if [ -z "$file" ]; then
+            echo "stub gh: Could not resolve to a PullRequest" >&2
+            exit 1
+          fi
+          jq -r "$expr" "$file"
+          exit $? ;;
+        *PrInbox*)
+          if [ -n "${STUB_GH_INBOX_EXIT:-}" ] && [ "$STUB_GH_INBOX_EXIT" != "0" ]; then exit "$STUB_GH_INBOX_EXIT"; fi
+          expr="$(arg_after -q "$@" || arg_after --jq "$@" || true)"
+          [ -n "$expr" ] || expr="."
+          if [ -n "${STUB_GH_INBOX_JSON:-}" ]; then
+            jq -r "$expr" "$STUB_GH_INBOX_JSON"
+          else
+            printf '%s\n' '{"data":{"requested":{"issueCount":0,"nodes":[]},"mine":{"issueCount":0,"nodes":[]}}}' | jq -r "$expr"
+          fi
+          exit $? ;;
         *PrFeedback*)
           if [ -n "${STUB_GH_FEEDBACK_EXIT:-}" ] && [ "$STUB_GH_FEEDBACK_EXIT" != "0" ]; then exit "$STUB_GH_FEEDBACK_EXIT"; fi
           expr="$(arg_after -q "$@" || arg_after --jq "$@" || true)"

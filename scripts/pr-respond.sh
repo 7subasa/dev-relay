@@ -38,17 +38,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-RE_ID='^[A-Za-z0-9_=-]+$'
-RE_VER='^[A-Za-z0-9_=@:.,+/-]+$'
-RE_NUM='^[0-9]+$'
-RE_URL='^https://[^[:space:]]+$'
-RE_SHA='^[0-9a-f]{40}$'
-RE_B64='^[A-Za-z0-9+/=]+$'
-RE_FILE='^[A-Za-z0-9._-]+$'
-
-# 値の形を調べる。引数: 正規表現 値
-is_re() { printf '%s\n' "$2" | LC_ALL=C grep -Eq -- "$1"; }
-
 # ---- 収集（feedback / ci-log / respond が同じものを使う） ----------------------
 
 # jq のプログラムが出した機械の行を読み、FB_* と、$TMPD の fb.threads / fb.items / fb.ci に入れる。
@@ -253,7 +242,7 @@ fb_collect() {
 
   fb_query
   if [ "$FB_FOUND" -eq 1 ]; then
-    grep -v '^@@dr ' "$TMPD/fb.out" > "$TMPD/fb.jq.out" || true
+    LC_ALL=C grep -av '^@@dr ' "$TMPD/fb.out" > "$TMPD/fb.jq.out" || true
     fb_compare
   fi
 }
@@ -358,8 +347,6 @@ pr_ci_log() {
 
 # ---- respond ----------------------------------------------------------------
 
-add_reason() { R_REASONS="${R_REASONS:+$R_REASONS;}$1"; }
-
 # 計画のファイルの写し（$TMPD/plan.txt）を読む。結果は次の変数に入る（$(...) の中で呼ばない）:
 #   PL_COMMIT（メッセージのファイル名）PL_COMMIT_REF PL_REPLIES（行: <id> <ファイル名>）
 #   PL_COMMENT_FILE PL_COMMENT_IDS（空白区切り）PL_RERUNS（行: <run の id>）
@@ -435,25 +422,6 @@ plan_add_file() {
     PL_FILES="${PL_FILES:+$PL_FILES
 }$1"
   fi
-}
-
-# 本文の末尾の空白だけの行を落として出す。引数: ファイル
-strip_trailing_blank() {
-  LC_ALL=C awk '{ if ($0 ~ /^[[:space:]]*$/) { blanks = blanks $0 "\n" } else { printf "%s", blanks; blanks = ""; print } }' "$1"
-}
-
-# 投稿する形を作る: 末尾の空白行を落とし、{{commit}} を置き換え、空行1つを挟んで印を最後の行に付ける。
-# 引数: 元のファイル 出力ファイル SHA（置き換えない場合は空） 印
-build_post() {
-  local src="$1" dest="$2" sha="$3" marker="$4"
-  strip_trailing_blank "$src" > "$dest.1"
-  if [ -n "$sha" ]; then
-    render_template "$dest.1" '{{commit}}' "$sha" > "$dest.2"
-  else
-    cp "$dest.1" "$dest.2"
-  fi
-  { cat "$dest.2"; printf '\n%s\n' "$marker"; } > "$dest"
-  rm -f "$dest.1" "$dest.2"
 }
 
 # 版の一覧（空白区切りの id）から、まとめのコメントの印を作る
@@ -606,23 +574,6 @@ EOF
   WANT="$(git hash-object --stdin < "$TMPD/confirm.in")"
 }
 
-# 排他を取る。取れなければ respond.result=locked で 1
-lock_acquire() {
-  local common pidfile pid=""
-  common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
-  LOCK_DIR=""
-  if ! mkdir "$common/dev-relay-respond.lock" 2>/dev/null; then
-    pidfile="$common/dev-relay-respond.lock/pid"
-    if [ -r "$pidfile" ]; then IFS= read -r pid < "$pidfile" || true; fi
-    echo "respond.result=locked"
-    echo "error: 別の pr respond が実行中か、前の実行の排他が残っています: ${common}/dev-relay-respond.lock${pid:+（pid ${pid}）}" >&2
-    echo "実行中でないことを確かめてから、そのフォルダを消してください（自動では消しません）。" >&2
-    exit 1
-  fi
-  LOCK_DIR="$common/dev-relay-respond.lock"
-  printf '%s\n' "$$" > "$LOCK_DIR/pid"
-}
-
 # 返信か、まとめのコメントを GraphQL で投稿する。URL を GH_LINE に入れる。
 # 引数: 問い合わせのファイル id 本文のファイル 取り出す式
 gh_post() {
@@ -655,7 +606,7 @@ pr_respond() {
   in_git_repo || die "git リポジトリの外では実行できません"
 
   # 2. 排他（--confirm のとき）
-  if [ "$mode" = "confirm" ]; then lock_acquire; fi
+  if [ "$mode" = "confirm" ]; then lock_acquire dev-relay-respond.lock respond.result "pr respond"; fi
 
   # 3. 計画の写し。以降の検査、確認の値、投稿、コミットには、この写しだけを使う
   PLAN_DIR="$(cd "$(dirname "$plan")" && pwd)"

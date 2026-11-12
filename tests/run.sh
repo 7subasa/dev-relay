@@ -113,6 +113,8 @@ new_env() {
   unset STUB_REAL_GIT STUB_GIT_REDIRECT_TO STUB_GIT_REDIRECT_FROM GIT_ALLOW_PROTOCOL
   unset STUB_GH_FEEDBACK_JSON STUB_GH_FEEDBACK_EXIT STUB_GH_POSTS STUB_GH_REPLY_FAIL STUB_GH_COMMENT_EXIT
   unset STUB_GH_RUN_LOG STUB_GH_RUN_ATTEMPT STUB_GH_RERUN_EXIT
+  unset STUB_GH_INBOX_JSON STUB_GH_INBOX_EXIT STUB_GH_REVIEW_JSON STUB_GH_REVIEW_JSON_AFTER
+  unset STUB_GH_REVIEW_EXIT STUB_GH_REVIEW_EXIT_AFTER STUB_GH_ADDREVIEW_EXIT HOOK_MARK
   : > "$STUB_LOG"
   REPO="$T/repo"
   git init -q "$REPO"
@@ -2976,6 +2978,28 @@ t_fb_feedback() {
   assert_has "$f" "- pending deploy（run -）"
 }
 
+# NUL と ESC が1つ混ざった本文（NUL は、あとの grep がファイルをバイナリと見る原因）。バイトの有無を調べる。引数: ファイル
+has_nul() { [ "$(LC_ALL=C tr -d '\000' < "$1" | wc -c | tr -d ' ')" != "$(wc -c < "$1" | tr -d ' ')" ]; }
+has_esc() { LC_ALL=C grep -aq "$(printf '\033')" "$1"; }
+
+t_fb_feedback_ctrl_chars() {
+  local f i
+  fb_env || return 0
+  # スレッドのコメントの本文に NUL と ESC を入れる
+  fb_edit "(.. | select(type == \"object\" and .id? == \"PRRC_todo1\") | .body) = \"Please rename\\u0000 this\\u001b[31m variable.\\tkept\""
+  dr pr feedback; assert_rc 0
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  assert_eq "$(kv fb.threads.todo)" 5 "fb.threads.todo"
+  f="$(kv fb.items)"
+  assert_file "$f"
+  assert_has "$f" "# PR #1 のフィードバック"
+  for i in PRRT_todo1 PRRT_self1 PRRT_fake1 PRRT_path1 PRRT_edit1; do assert_has "$f" "### $i"; done
+  assert_has "$f" "- PRRT_wait1 app.txt:3"
+  assert_line "$(cat "$f")" "$(printf '> Please rename? this?[31m variable.\tkept')" "NUL と ESC は ? になり、タブは残る"
+  ! has_nul "$f" || fail "一覧のファイルに NUL のバイトがある"
+  ! has_esc "$f" || fail "一覧のファイルに ESC のバイトがある"
+}
+
 t_fb_no_lookup_without_permission() {
   local p
   fb_env || return 0
@@ -3868,7 +3892,7 @@ t_work_done_bad_names() {
   mkdir -p "$r/pr/p" "$r/done/t"
   long65="$(printf 'a%.0s' $(seq 1 65))"
   before="$(tree_of "$r")"
-  for n in "" "../x" "a/b" ".x" "-x" done pr review "$long65" "done/t" "pr/" "pr/." "pr/.." "pr/a/b" "pr/a b" "pr/../t" "./t"; do
+  for n in "" "../x" "a/b" ".x" "-x" done pr review pr-review "$long65" "done/t" "pr/" "pr/." "pr/.." "pr/a/b" "pr/a b" "pr/../t" "./t"; do
     dr work done "$n"
     assert_eq "$RC" 1 "終了コード ('$n')"
     assert_eq "$(tree_of "$r")" "$before" "何も動かない ('$n')"
@@ -3980,6 +4004,8 @@ t_work_usage() {
     assert_eq "$RC" 0 "終了コード ('$a')"
     assert_has "$T/out" "work dir"
     assert_has "$T/out" "work done"
+    assert_has "$T/out" "pr-review/"
+    assert_contains "$(tail -n 1 "$T/out")" "終了コード: " "使い方の最後の行 ('$a')"
   done
   dr work nosuch; assert_rc 1
   [ ! -e "$REPO/.dev-relay" ] || fail "使い方を出すだけで .dev-relay を作った"
@@ -3987,6 +4013,1095 @@ t_work_usage() {
   dr --help; assert_rc 0
   assert_has "$T/out" "work dir"
   assert_has "$T/out" "work done"
+  assert_has "$T/out" "pr-review/"
+}
+
+# ---- P4: 届いた PR をレビューする（テストの道具） --------------------------------
+
+IB_FIXTURE="$HERE/fixtures/pr-inbox.json"
+RV_FIXTURE="$HERE/fixtures/pr-review.json"
+RV_PR='.data.repository.pullRequest'
+RV_MARK='<!-- dev-relay:review -->'
+SHA_X="1111111111111111111111111111111111111111"
+SHA_Y="2222222222222222222222222222222222222222"
+
+# 一覧の題材を $T/ib.json に置き、偽の gh の応答にする
+ib_init() { cp "$IB_FIXTURE" "$T/ib.json"; export STUB_GH_INBOX_JSON="$T/ib.json"; }
+# 今の一覧の題材を、jq のフィルタ（先に --arg などを渡してよい）で書き換える
+ib_edit() { jq "$@" "$T/ib.json" > "$T/ib.new" && mv "$T/ib.new" "$T/ib.json"; }
+# PR の題材を $T/rv.json に置き、偽の gh の応答にする。先頭の SHA（HEAD_SHA の所）は、引数か、bare の PR の先頭
+rv_init() {
+  jq --arg sha "${1:-$PRHEAD}" '(.. | select(. == "HEAD_SHA")) = $sha' "$RV_FIXTURE" > "$T/rv.json"
+  export STUB_GH_REVIEW_JSON="$T/rv.json"
+}
+rv_edit() { jq "$@" "$T/rv.json" > "$T/rv.new" && mv "$T/rv.new" "$T/rv.json"; }
+# 題材の headRefOid だけを替える（印付きのレビューの commit.oid は替えない）
+rv_head() { rv_edit --arg sha "$1" "$RV_PR.headRefOid = \$sha"; }
+# AddReview のあとの PrReview に使う題材を、今の題材から作る。引数: jq のフィルタ（--arg などを先に渡してよい）
+rv_after() {
+  jq "$@" "$T/rv.json" > "$T/rv-after.json" || fail "AddReview のあとの題材を作れなかった"
+  export STUB_GH_REVIEW_JSON_AFTER="$T/rv-after.json"
+}
+# 題材のレビューに1つ足す式。引数: 状態、本文、commit.oid
+rv_add_review() { printf '%s.reviews.nodes += [{state: "%s", body: "%s", commit: {oid: "%s"}}] | %s.reviews.totalCount += 1' "$RV_PR" "$1" "$2" "$3" "$RV_PR"; }
+
+# 手元の bare リポジトリを clone した先（$T/prc）で git を動かす
+prc() { "$STUB_REAL_GIT" -C "$T/prc" "$@"; }
+
+# bare に、main と、PR の先頭（refs/pull/7/head）を置く。MAINHEAD と PRHEAD に、その SHA を入れる。
+# main には AGENTS.md と20行の app.txt がある。PR の先頭は、main から分かれ、次を持つ:
+# app.txt の2行目の変更、新しい lib/new.txt（3行）、AGENTS.md の変更、新しい .cursor/rules/x.mdc、新しい docs/CLAUDE.md、
+# 新しい docs/a b.txt、数に見える名前の新しい 01 と 1、バックスラッシュを含む新しい docs/a\nb.txt（文字としての \ と n）、@ で始まる新しい @scope/pkg.txt、新しい .githooks/post-checkout（実行できる。呼ばれると、環境変数 HOOK_MARK のファイルに1行書く）
+rv_bare() {
+  local c="$T/prc"
+  "$STUB_REAL_GIT" clone -q "$BARE" "$c" || return 1
+  prc config user.name tester
+  prc config user.email "$NOREPLY"
+  prc config commit.gpgsign false
+  prc checkout -q main || return 1
+  seq 1 20 | sed 's/^/l/' > "$c/app.txt"
+  printf 'base agents\n' > "$c/AGENTS.md"
+  prc add app.txt AGENTS.md && prc commit -qm "base for review" && prc push -q origin main || return 1
+  MAINHEAD="$(prc rev-parse HEAD)"
+  prc checkout -q -b prh || return 1
+  mkdir -p "$c/lib" "$c/docs" "$c/.cursor/rules" "$c/.githooks"
+  sed 's/^l2$/l2 changed/' "$c/app.txt" > "$c/app.new" && mv "$c/app.new" "$c/app.txt"
+  printf 'n1\nn2\nn3\n' > "$c/lib/new.txt"
+  printf 'agents changed by the PR\n' > "$c/AGENTS.md"
+  printf 'rule\n' > "$c/.cursor/rules/x.mdc"
+  printf 'docs rules\n' > "$c/docs/CLAUDE.md"
+  printf 'two words\nsecond\n' > "$c/docs/a b.txt"
+  printf 'zero one\n' > "$c/01"
+  printf 'one\n' > "$c/1"
+  printf 'back\nslash\n' > "$c/docs/"'a\nb.txt'
+  mkdir -p "$c/@scope"
+  printf 'scoped\n' > "$c/@scope/pkg.txt"
+  printf '%s\n' '#!/bin/sh' '[ -n "${HOOK_MARK:-}" ] && printf "ran\n" >> "$HOOK_MARK"' 'exit 0' > "$c/.githooks/post-checkout"
+  chmod +x "$c/.githooks/post-checkout"
+  prc add -A && prc commit -qm "PR change" || return 1
+  PRHEAD="$(prc rev-parse HEAD)"
+  prc push -q origin prh:refs/pull/7/head || return 1
+}
+
+# bare の PR の先頭を、新しいコミットに（強制で）進め、その SHA を NEWHEAD に入れる
+rv_advance() {
+  prc checkout -q prh && printf 'more\n' > "$T/prc/lib/more.txt" && prc add lib/more.txt && prc commit -qm "more" \
+    && prc push -q -f origin prh:refs/pull/7/head || return 1
+  NEWHEAD="$(prc rev-parse HEAD)"
+}
+
+# PR をレビューするテストの土台。許可済みのリポジトリで、bare に main と PR の先頭があり、題材の headRefOid がその先頭。
+# 下書きのフォルダは $PD（取り出すまでは無い）。jq が無ければ skip して 1 を返す（呼ぶ側は rv_env || return 0）
+rv_env() {
+  pr_env
+  need_jq || return 1
+  rv_bare || { fail "bare に PR の先頭を作れなかった"; return 1; }
+  STUB_GH_POSTS="$T/posts"
+  export STUB_GH_POSTS
+  mkdir -p "$STUB_GH_POSTS"
+  RVD="$REPO/.dev-relay/pr-review"
+  PD="$RVD/7/drafts"
+  rv_init
+  ib_init
+  : > "$STUB_LOG"
+}
+
+# rv_env のあと、PR 7 を取り出し、まとめ（b.md）と行のコメント（t1.md）と計画（plan）を書く。引数に nofetch があれば、取り出さない
+rv_post_env() {
+  rv_env || return 1
+  if [ "${1:-}" = nofetch ]; then
+    mkdir -p "$PD"
+  else
+    dr pr review fetch 7
+    if [ "$RC" -ne 0 ] || [ "$(kv pr.ready)" != yes ]; then fail "pr review fetch 7 が通らなかった"; return 1; fi
+    PD="$(kv review.drafts)"
+  fi
+  pf b.md "Summary of the review."
+  pf t1.md "Line A" "Line B" "" ""
+  rv_plan "thread t1.md 1 lib/new.txt"
+  : > "$STUB_LOG"
+}
+# 計画を書く。head と base は、取り出したときの値。引数: 足す行...
+rv_plan() { pf plan "head $PRHEAD" "base main" "body b.md" "$@"; }
+# pr review post を、確認の値を取る形（--dry-run）と、その値で動かす形（--confirm）で呼ぶ
+rv_dry() { dr pr review post 7 --plan "$PD/plan" --dry-run; RVCONFIRM="$(kv review.confirm)"; }
+rv_go()  { dr pr review post 7 --plan "$PD/plan" --confirm "$RVCONFIRM"; }
+
+# AddReview を呼んだ回数（失敗した呼び出しも数える）
+addrev_calls() { grep -c 'mutation AddReview(' "$STUB_LOG" || true; }
+# 偽の gh が記録したレビュー（<連番>-AddReview-PR_stub7.md）。引数: 何番目か（省略時は1）
+addrev_file() { ls "$STUB_GH_POSTS"/[0-9]*-AddReview-PR_stub7.md 2>/dev/null | sed -n "${1:-1}p"; }
+rv_no_lock() { [ ! -e "$REPO/.git/dev-relay-review.lock" ] || fail "排他のフォルダが残っている"; }
+# 取り出しの出力から worktree と参照の状態を調べる
+rv_wt_count() { git -C "$REPO" worktree list | wc -l | tr -d ' '; }
+rv_refs() { git -C "$REPO" for-each-ref refs/dev-relay; }
+
+# 何も投稿せず、push もせず、排他も残っていない
+assert_review_nothing_sent() {
+  assert_eq "$(addrev_calls)" 0 "AddReview の回数"
+  assert_eq "$(git_pushes)" 0 "git push の回数"
+  rv_no_lock
+}
+
+# 計画（引数の行）を書き、--dry-run と --confirm（でたらめな値）の両方が 1 で、
+# review.reason に $1 が含まれ、何も投稿しないことを確かめる
+bad_rv_plan() {
+  local want="$1" c
+  shift
+  pf plan "$@"
+  for c in dry confirm; do
+    : > "$STUB_LOG"
+    if [ "$c" = dry ]; then
+      dr pr review post 7 --plan "$PD/plan" --dry-run
+    else
+      dr pr review post 7 --plan "$PD/plan" --confirm "0000000000000000000000000000000000000000"
+    fi
+    assert_eq "$RC" 1 "終了コード ($want, $c)"
+    assert_contains "$(kv review.reason)" "$want" "review.reason ($want, $c)"
+    assert_eq "$(kv review.confirm)" "" "確認の値を出さない ($want, $c)"
+    assert_review_nothing_sent
+  done
+}
+
+# 今の計画で、--dry-run と --confirm（でたらめな値）の両方が 1 で、キー $1 に $2 が含まれ、何も投稿しないことを確かめる。引数: キー、含まれる語、ラベル
+rv_stopped() {
+  local key="$1" want="$2" label="$3" c
+  for c in dry confirm; do
+    : > "$STUB_LOG"
+    if [ "$c" = dry ]; then
+      dr pr review post 7 --plan "$PD/plan" --dry-run
+    else
+      dr pr review post 7 --plan "$PD/plan" --confirm "0000000000000000000000000000000000000000"
+    fi
+    assert_eq "$RC" 1 "終了コード ($label, $c)"
+    assert_contains "$(kv "$key")" "$want" "$key ($label, $c)"
+    assert_eq "$(kv review.confirm)" "" "確認の値を出さない ($label, $c)"
+    assert_review_nothing_sent
+  done
+}
+
+# ---- P4: テスト -------------------------------------------------------------
+
+t_rv_inbox() {
+  local f t r
+  rv_env || return 0
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv tool.gh)" ok "tool.gh"
+  assert_eq "$(kv git.repo)" yes "git.repo"
+  assert_eq "$(kv pr.allowed)" on "pr.allowed"
+  assert_eq "$(kv pr.account)" stub-user "pr.account"
+  assert_eq "$(kv pr.repo)" stub/repo "pr.repo"
+  # 問い合わせの変数: 許可したリポジトリとアカウントだけを照会する（どれも -f の文字列）
+  assert_has "$STUB_LOG" "-f reqq=repo:stub/repo is:pr is:open review-requested:stub-user -f mineq=repo:stub/repo is:pr is:open author:stub-user -q "
+  assert_eq "$(kv inbox.requested)" 2 "inbox.requested"
+  assert_eq "$(kv inbox.mine)" 3 "inbox.mine"
+  assert_eq "$(kv inbox.truncated)" no "inbox.truncated"
+  f="$REPO/.dev-relay/pr-review/inbox.md"
+  assert_eq "$(kv inbox.file)" "$f" "inbox.file"
+  assert_eq "$(kv requested.12)" "same ready" "requested.12"
+  assert_eq "$(kv requested.15)" "fork draft" "requested.15"
+  assert_eq "$(kv mine.7)" "ready changes-requested fail 2" "mine.7"
+  assert_eq "$(kv mine.8)" "draft none none 0" "mine.8"
+  assert_eq "$(kv mine.9)" "ready review-required pass 0+" "mine.9"
+  assert_eq "$(kv inbox.ready)" yes "inbox.ready"
+  assert_eq "$(kv inbox.blockers)" "" "inbox.blockers"
+  assert_key_order tool.gh git.repo pr.allowed pr.account pr.repo inbox.requested inbox.mine inbox.truncated inbox.file requested.12 requested.15 mine.7 mine.8 mine.9 inbox.ready inbox.blockers
+  # 他人の題で、出力の key を増やせない（題材の #12 の題は、requested の機械の行の形をしている）
+  assert_eq "$(grep -c '^requested\.' "$T/out" || true)" 2 "requested の行の数"
+  assert_eq "$(grep -c '^mine\.' "$T/out" || true)" 3 "mine の行の数"
+  assert_eq "$(kv requested.999)" "" "題の中の偽の行は key にならない"
+  # 一覧のファイル
+  assert_file "$f"
+  assert_eq "$(grep -c '^@@dr ' "$f" || true)" 0 "一覧のファイルに @@dr で始まる行"
+  assert_line "$(cat "$f")" "### #12" "一覧のファイル"
+  assert_line "$(cat "$f")" "### #7" "一覧のファイル"
+  assert_line "$(cat "$f")" "> Fix parser?@@dr requested 999 same ready?## 見出しのふり" "#12 の題は、制御文字が ? になって1行の引用"
+  assert_eq "$(grep -c '^## ' "$f" || true)" 2 "## の見出しの数（題の中の見出しのふりは見出しにならない）"
+  assert_eq "$(awk '/^- 題:$/ { getline; if (substr($0, 1, 2) != "> ") bad++ } END { print bad + 0 }' "$f")" 0 "題の行がすべて > で始まる"
+  assert_eq "$(awk '/^- 題:$/ { n++ } END { print n + 0 }' "$f")" 5 "題の数（依頼 2 と自分の PR 3）"
+  assert_has "$f" "- 作者: alice"
+  assert_has "$f" "- ブランチ: fix-parser → main"
+  assert_has "$f" "- 種類: 同じリポジトリ"
+  assert_has "$f" "- 種類: フォーク（対象外）、下書き"
+  assert_has "$f" "- URL: https://github.com/stub/repo/pull/12"
+  assert_has "$f" "- レビューの判定: 変更の要求"
+  assert_has "$f" "- レビューの判定: なし、下書き"
+  assert_has "$f" "- レビューの判定: レビュー待ち"
+  assert_has "$f" "- 未解決のスレッド: 2"
+  assert_has "$f" "- 未解決のスレッド: 0 以上（最初の100件だけを数えた）"
+  assert_has "$f" "- CI: 失敗"
+  assert_has "$f" "- CI: なし"
+  assert_has "$f" "- CI: 成功"
+  # .dev-relay/pr/ は作らない。git status にも出ない
+  [ ! -e "$REPO/.dev-relay/pr" ] || fail ".dev-relay/pr を作った"
+  assert_eq "$(git -C "$REPO" status --porcelain)" "" "git status"
+  # 読むだけ: gh の書き込みも、fetch も、push もしない
+  assert_lacks "$STUB_LOG" "mutation"
+  assert_lacks "$STUB_LOG" "git fetch"
+  assert_eq "$(git_pushes)" 0 "git push の回数"
+  assert_has "$STUB_LOG" "gh api --hostname github.com graphql"
+  assert_eq "$(rv_wt_count)" 1 "worktree を作っていない"
+  # HEAD がブランチを指していなくても、同じ結果
+  cp "$T/out" "$T/out1"
+  git -C "$REPO" checkout -q --detach
+  dr pr inbox; assert_rc 0
+  assert_eq "$(cat "$T/out")" "$(cat "$T/out1")" "detached HEAD の出力"
+  # 依頼も自分の PR も無い応答は、0件の一覧になる
+  unset STUB_GH_INBOX_JSON
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv inbox.requested)" 0 "0件: inbox.requested"
+  assert_eq "$(kv inbox.mine)" 0 "0件: inbox.mine"
+  assert_eq "$(kv inbox.ready)" yes "0件: inbox.ready"
+  assert_eq "$(grep -c '^なし$' "$f" || true)" 2 "0件: 見出しの下に「なし」"
+}
+
+t_rv_no_permission() {
+  local p c
+  rv_env || return 0
+  # 計画は、レビューのフォルダの外に置く（フォルダを作っていないことを確かめるため）
+  PD="$T/plan"
+  mkdir -p "$PD"
+  pf b.md "Summary."
+  pf plan "head $PRHEAD" "base main" "body b.md"
+  git -C "$REPO" config --unset dev-relay.pr
+  for p in permission-unset not-allowed; do
+    if [ "$p" = not-allowed ]; then git -C "$REPO" config dev-relay.pr off; fi
+    : > "$STUB_LOG"
+    dr pr inbox; assert_rc 0
+    assert_eq "$(kv inbox.ready)" no "inbox.ready ($p)"
+    assert_eq "$(kv inbox.blockers)" "$p" "inbox.blockers ($p)"
+    assert_eq "$(kv pr.account)" "" "アカウントは出ない ($p)"
+    assert_eq "$(kv inbox.requested)" "" "一覧は出ない ($p)"
+    dr pr review fetch 7; assert_rc 0
+    assert_eq "$(kv pr.ready)" no "fetch の pr.ready ($p)"
+    assert_eq "$(kv pr.blockers)" "$p" "fetch の pr.blockers ($p)"
+    assert_eq "$(kv pr.head)" "" "PR は出ない ($p)"
+    for c in dry confirm; do
+      if [ "$c" = dry ]; then
+        dr pr review post 7 --plan "$PD/plan" --dry-run
+      else
+        dr pr review post 7 --plan "$PD/plan" --confirm "0000000000000000000000000000000000000000"
+      fi
+      assert_eq "$RC" 1 "post の終了コード ($p, $c)"
+      assert_eq "$(kv pr.blockers)" "$p" "post の pr.blockers ($p, $c)"
+      assert_eq "$(kv review.confirm)" "" "確認の値は出ない ($p, $c)"
+    done
+    assert_lacks "$STUB_LOG" "gh api"
+    assert_lacks "$STUB_LOG" "git fetch"
+    assert_lacks "$STUB_LOG" "git push"
+    [ ! -e "$REPO/.dev-relay" ] || fail "フォルダを作った ($p)"
+    assert_eq "$(rv_wt_count)" 1 "worktree を作っていない ($p)"
+    assert_eq "$(rv_refs)" "" "参照を作っていない ($p)"
+    rv_no_lock
+  done
+}
+
+t_rv_inbox_failures() {
+  local lvl before_e before_r r
+  rv_env || return 0
+  # 問い合わせの失敗
+  export STUB_GH_INBOX_EXIT=1
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv inbox.ready)" no "失敗: inbox.ready"
+  assert_contains "$(kv inbox.blockers)" inbox-unknown "失敗: inbox.blockers"
+  unset STUB_GH_INBOX_EXIT
+  # 形の合わない機械の行（番号が「x y」）
+  ib_edit '.data.requested.nodes[0].number = "x y"'
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv inbox.ready)" no "形の誤り: inbox.ready"
+  assert_contains "$(kv inbox.blockers)" inbox-unknown "形の誤り: inbox.blockers"
+  assert_eq "$(kv requested.999)" "" "形の誤り: 偽の行を出さない"
+  # 合計が載せた数より大きければ、truncated（止めない）
+  ib_init
+  ib_edit '.data.requested.issueCount = 51'
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv inbox.truncated)" yes "requested が多い: inbox.truncated"
+  assert_eq "$(kv inbox.requested)" 2 "requested が多い: 載せた数"
+  assert_eq "$(kv inbox.ready)" yes "requested が多い: inbox.ready"
+  ib_init
+  ib_edit '.data.mine.issueCount = 60'
+  dr pr inbox; assert_rc 0
+  assert_eq "$(kv inbox.truncated)" yes "mine が多い: inbox.truncated"
+  assert_eq "$(kv inbox.mine)" 3 "mine が多い: 載せた数"
+  assert_eq "$(kv inbox.ready)" yes "mine が多い: inbox.ready"
+  # シンボリックリンク: .dev-relay、.dev-relay/pr-review、inbox.md のどれかがリンクなら 1 で、リンク先を書き換えない
+  r="$REPO/.dev-relay"
+  for lvl in dev-relay pr-review inbox; do
+    rm -rf "$r" "$T/elsewhere"
+    mkdir "$T/elsewhere"
+    printf 'keep\n' > "$T/elsewhere/target"
+    case "$lvl" in
+      dev-relay) ln -s "$T/elsewhere" "$r" ;;
+      pr-review) mkdir "$r"; ln -s "$T/elsewhere" "$r/pr-review" ;;
+      inbox)     mkdir -p "$r/pr-review"; ln -s "$T/elsewhere/target" "$r/pr-review/inbox.md" ;;
+    esac
+    before_e="$(tree_of "$T/elsewhere")"
+    before_r="$(tree_of "$r")"
+    dr pr inbox
+    assert_eq "$RC" 1 "終了コード (${lvl} がリンク)"
+    assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "標準エラー (${lvl} がリンク)"
+    assert_eq "$(tree_of "$T/elsewhere")" "$before_e" "リンク先が変わらない (${lvl} がリンク)"
+    assert_eq "$(cat "$T/elsewhere/target")" keep "リンク先の中身 (${lvl} がリンク)"
+    assert_eq "$(tree_of "$r")" "$before_r" "何も作らない (${lvl} がリンク)"
+  done
+  # 対照: リンクが無ければ通る
+  rm -rf "$r" "$T/elsewhere"
+  dr pr inbox; assert_rc 0
+}
+
+t_rv_fetch() {
+  local br h0 st0 w info neutral
+  rv_env || return 0
+  # review-7 というブランチの PR のフォルダ。レビューのフォルダとは別の場所で、変わらない
+  mkdir -p "$REPO/.dev-relay/pr/review-7/drafts"
+  printf '*\n' > "$REPO/.dev-relay/.gitignore"
+  printf 'keep\n' > "$REPO/.dev-relay/pr/review-7/drafts/plan"
+  br="$(git -C "$REPO" symbolic-ref HEAD)"
+  h0="$(head_sha)"
+  st0="$(git -C "$REPO" status --porcelain)"
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(kv tool.gh)" ok "tool.gh"
+  assert_eq "$(kv git.repo)" yes "git.repo"
+  assert_eq "$(kv pr.allowed)" on "pr.allowed"
+  assert_eq "$(kv pr.account)" stub-user "pr.account"
+  assert_eq "$(kv pr.repo)" stub/repo "pr.repo"
+  assert_eq "$(kv pr.number)" 7 "pr.number"
+  assert_eq "$(kv pr.url)" "https://github.com/stub/repo/pull/7" "pr.url"
+  assert_eq "$(kv pr.state)" open "pr.state"
+  assert_eq "$(kv pr.draft)" no "pr.draft"
+  assert_eq "$(kv pr.fork)" no "pr.fork"
+  assert_eq "$(kv pr.own)" no "pr.own"
+  assert_eq "$(kv pr.head)" "$PRHEAD" "pr.head"
+  assert_eq "$(kv pr.base)" main "pr.base"
+  assert_eq "$(kv pr.base-sha)" "$(bare_ref main)" "pr.base-sha（bare の main の先頭）"
+  assert_eq "$(kv pr.base-sha)" "$MAINHEAD" "pr.base-sha"
+  assert_eq "$(kv pr.merge-base)" "$MAINHEAD" "pr.merge-base（main の先頭）"
+  assert_eq "$(kv pr.files)" 7 "pr.files"
+  assert_eq "$(kv review.reviewed)" 1 "review.reviewed"
+  assert_eq "$(kv review.pending)" no "review.pending"
+  w="$REPO/.dev-relay/pr-review/7"
+  assert_eq "$(kv review.dir)" "$w" "review.dir"
+  assert_eq "$(kv review.info)" "$w/info.md" "review.info"
+  assert_eq "$(kv review.worktree)" "$w/wt" "review.worktree"
+  assert_eq "$(kv review.out)" "$w/review" "review.out"
+  assert_eq "$(kv review.drafts)" "$w/drafts" "review.drafts"
+  assert_eq "$(kv review.neutralized)" 3 "review.neutralized"
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  assert_eq "$(kv pr.blockers)" "" "pr.blockers"
+  assert_key_order tool.gh git.repo pr.allowed pr.account pr.repo pr.number pr.url pr.state pr.draft pr.fork pr.own pr.head pr.base pr.base-sha pr.merge-base pr.files review.reviewed review.pending review.dir review.info review.worktree review.out review.drafts review.neutralized pr.ready pr.blockers
+  [ -d "$w/review" ] && [ -d "$w/drafts" ] && [ -d "$w/wt" ] || fail "review/ drafts/ wt/ のどれかができていない"
+  # 自分の PR のフォルダ（.dev-relay/pr/review-7）は変わらない
+  assert_eq "$(tree_of "$REPO/.dev-relay/pr")" "$(printf '%s\n' "$REPO/.dev-relay/pr" "$REPO/.dev-relay/pr/review-7" "$REPO/.dev-relay/pr/review-7/drafts" "$REPO/.dev-relay/pr/review-7/drafts/plan")" ".dev-relay/pr の中身"
+  assert_eq "$(cat "$REPO/.dev-relay/pr/review-7/drafts/plan")" keep "review-7 の下書き"
+  # worktree は PR の先頭で、ブランチを指さない
+  assert_eq "$(git -C "$w/wt" rev-parse HEAD)" "$PRHEAD" "worktree の HEAD"
+  if git -C "$w/wt" symbolic-ref -q HEAD >/dev/null 2>&1; then fail "worktree がブランチを指している"; fi
+  assert_contains "$(git -C "$REPO" worktree list --porcelain)" "worktree $w/wt" "git の worktree の登録"
+  # 今のブランチ、HEAD、作業ツリーは変わらない
+  assert_eq "$(git -C "$REPO" symbolic-ref HEAD)" "$br" "今のブランチ"
+  assert_eq "$(head_sha)" "$h0" "手元の HEAD"
+  assert_eq "$(git -C "$REPO" status --porcelain)" "$st0" "git status"
+  assert_eq "$(git -C "$REPO" status --porcelain)" "" "git status に何も出ない"
+  # 2つの参照
+  assert_eq "$(git -C "$REPO" rev-parse refs/dev-relay/review/7/head)" "$PRHEAD" "refs/dev-relay/review/7/head"
+  assert_eq "$(git -C "$REPO" rev-parse refs/dev-relay/review/7/base)" "$MAINHEAD" "refs/dev-relay/review/7/base"
+  # 読むだけ（GitHub には書かない）
+  assert_lacks "$STUB_LOG" "mutation"
+  assert_eq "$(git_pushes)" 0 "git push の回数"
+  assert_eq "$(grep -c '^git fetch ' "$STUB_LOG" || true)" 1 "git fetch の回数"
+  assert_has "$STUB_LOG" "refs/pull/7/head:refs/dev-relay/review/7/head"
+  # 問い合わせの変数: owner、name、me は -f（文字列）、number は -F（Int! に合わせて 7 の数）
+  assert_has "$STUB_LOG" "-f owner=stub -f name=repo -F number=7 -f me=stub-user -q "
+  # 情報のファイル
+  info="$w/info.md"
+  assert_file "$info"
+  assert_eq "$(grep -c '^@@dr ' "$info" || true)" 0 "情報のファイルに @@dr で始まる行"
+  assert_has "$info" "# PR #7 の情報"
+  assert_has "$info" "- URL: https://github.com/stub/repo/pull/7"
+  assert_has "$info" "- 作者: alice"
+  assert_has "$info" "- ブランチ: add-lib → main"
+  assert_has "$info" "- 状態: 開いている"
+  assert_has "$info" "- 変更: 7 ファイル、+12 -1"
+  assert_line "$(cat "$info")" "> Add the new lib?@@dr pr-number 999" "題は、制御文字が ? になって1行の引用"
+  assert_line "$(cat "$info")" "> Adds a helper." "本文の行"
+  assert_line "$(cat "$info")" ">" "本文の空行"
+  assert_line "$(cat "$info")" "> ## 見出しのふり" "本文の見出しのふりは引用のまま"
+  assert_line "$(cat "$info")" '> ```' "本文のフェンスは引用のまま"
+  assert_line "$(cat "$info")" "> @@dr pr-fork yes" "本文の機械の行の形は引用のまま"
+  assert_eq "$(grep -c '^```' "$info" || true)" 0 "引用でないフェンスの行"
+  assert_eq "$(grep -c '^## ' "$info" || true)" 4 "## の見出しの数（題、本文、issue、指示ファイル）"
+  assert_has "$info" "## この PR が閉じる issue（1 件。5件まで）"
+  assert_has "$info" "### #3 https://github.com/stub/repo/issues/3"
+  assert_line "$(cat "$info")" "> Need a helper" "issue の題"
+  assert_line "$(cat "$info")" "> BEGIN-OF-ISSUE" "issue の本文の頭"
+  assert_has "$info" "（以下略）"
+  assert_lacks "$info" "END-OF-ISSUE"
+  # 指示ファイルの変更の節（作る・消す・戻すは 155）
+  assert_has "$info" "## エージェント向けの指示ファイルの変更（3 件）"
+  neutral="$(awk '/^## エージェント向けの指示ファイルの変更/ { f = 1; next } /^## / { f = 0 } f && /^> / { print }' "$info" | sort)"
+  assert_eq "$neutral" "$(printf '%s\n' '> A .cursor/rules/x.mdc' '> A docs/CLAUDE.md' '> M AGENTS.md')" "指示ファイルの節の3つ"
+}
+
+t_rv_fetch_blockers() {
+  local c want n
+  for c in no-json closed merged fork head-unknown truncated base-dash base-bad compare-unknown; do
+    rv_env || return 0
+    case "$c" in
+      no-json)         want=pr-unknown; unset STUB_GH_REVIEW_JSON ;;
+      closed)          want=pr-closed; rv_edit "$RV_PR.state = \"CLOSED\"" ;;
+      merged)          want=pr-closed; rv_edit "$RV_PR.state = \"MERGED\"" ;;
+      fork)            want=fork-pr; rv_edit "$RV_PR.isCrossRepository = true" ;;
+      head-unknown)    want=head-unknown; rv_head "$SHA_X" ;;
+      truncated)       want=pr-unknown; rv_edit "$RV_PR.reviews.totalCount = 101" ;;
+      base-dash)       want=pr-unknown; rv_edit "$RV_PR.baseRefName = \"-x\"" ;;
+      base-bad)        want=pr-unknown; rv_edit "$RV_PR.baseRefName = \"a..b\"" ;;
+      compare-unknown)
+        want=compare-unknown
+        # main を、PR の先頭と共通の祖先が無い履歴に差し替える
+        prc checkout -q --orphan unrelated
+        prc rm -rfq . 2>/dev/null || true
+        printf 'unrelated\n' > "$T/prc/unrelated.txt"
+        prc add unrelated.txt
+        prc commit -qm "unrelated"
+        prc push -q -f origin unrelated:refs/heads/main || fail "bare の main を差し替えられなかった" ;;
+    esac
+    : > "$STUB_LOG"
+    dr pr review fetch 7; assert_eq "$RC" 0 "終了コード ($c)"
+    assert_eq "$(kv pr.ready)" no "pr.ready ($c)"
+    assert_eq "$(kv pr.blockers)" "$want" "pr.blockers ($c)"
+    [ ! -e "$RVD/7/wt" ] || fail "worktree を作った ($c)"
+    assert_eq "$(rv_wt_count)" 1 "git に登録した worktree ($c)"
+    assert_eq "$(rv_refs)" "" "参照が残っていない ($c)"
+    assert_eq "$(git_pushes)" 0 "git push の回数 ($c)"
+    case "$c" in
+      head-unknown|compare-unknown) ;;
+      *)
+        assert_lacks "$STUB_LOG" "git fetch"
+        [ ! -e "$RVD/7" ] || fail "照会で止まるときは、フォルダを作らない ($c)" ;;
+    esac
+  done
+  # 番号の形の誤りは 1 で、gh を呼ばない
+  rv_env || return 0
+  for n in 0 abc 7x 07 -1 1234567890; do
+    : > "$STUB_LOG"
+    dr pr review fetch $n
+    assert_eq "$RC" 1 "終了コード (番号 '$n')"
+    assert_lacks "$STUB_LOG" "gh "
+    assert_lacks "$STUB_LOG" "git fetch"
+    [ ! -e "$RVD" ] || fail "フォルダを作った (番号 '$n')"
+  done
+  : > "$STUB_LOG"
+  dr pr review fetch; assert_rc 1
+  assert_lacks "$STUB_LOG" "gh "
+}
+
+t_rv_fetch_agent_files() {
+  local w
+  rv_env || return 0
+  dr pr review fetch 7; assert_rc 0
+  w="$(kv review.worktree)"
+  assert_eq "$(kv review.neutralized)" 3 "review.neutralized"
+  assert_eq "$(cat "$w/AGENTS.md")" "base agents" "AGENTS.md は main の版に戻る"
+  [ ! -e "$w/.cursor/rules/x.mdc" ] || fail "PR が足した .cursor/rules/x.mdc が残っている"
+  [ ! -e "$w/docs/CLAUDE.md" ] || fail "PR が足した docs/CLAUDE.md が残っている"
+  assert_has "$w/app.txt" "l2 changed"
+  assert_file "$w/lib/new.txt"
+  assert_file "$w/docs/a b.txt"
+  # 指示ファイルでないものは、PR の版のまま
+  assert_file "$w/.githooks/post-checkout"
+  # 差分は コミットどうしを比べるので、指示ファイルの変更も残る
+  assert_contains "$(git -C "$w" diff "$(kv pr.merge-base)" HEAD --name-only)" "AGENTS.md" "差分に AGENTS.md"
+  assert_contains "$(git -C "$w" diff "$(kv pr.merge-base)" HEAD --name-only)" ".cursor/rules/x.mdc" "差分に .cursor/rules/x.mdc"
+  assert_contains "$(git -C "$w" diff "$(kv pr.merge-base)" HEAD --name-only)" "docs/CLAUDE.md" "差分に docs/CLAUDE.md"
+  # PR の先頭そのものは変えない
+  assert_eq "$(git -C "$w" rev-parse HEAD)" "$PRHEAD" "worktree の HEAD"
+  assert_eq "$(git -C "$REPO" rev-parse refs/dev-relay/review/7/head)" "$PRHEAD" "参照の先頭"
+  assert_has "$(kv review.info)" "> M AGENTS.md"
+  assert_has "$(kv review.info)" "> A .cursor/rules/x.mdc"
+  assert_has "$(kv review.info)" "> A docs/CLAUDE.md"
+}
+
+t_rv_fetch_hooks() {
+  local n
+  rv_env || return 0
+  # 相対の core.hooksPath のフックは、git を動かした側（手元の作業ツリー）から探される。
+  # プロジェクトのフック（題材の PR も同じものを持つ）を手元にも置き、worktree を作る・消すときに動かないことを確かめる
+  mkdir -p "$REPO/.githooks"
+  prc show "$PRHEAD:.githooks/post-checkout" > "$REPO/.githooks/post-checkout"
+  chmod +x "$REPO/.githooks/post-checkout"
+  git -C "$REPO" config core.hooksPath .githooks
+  HOOK_MARK="$T/hookmark"
+  export HOOK_MARK
+  # 2回続けて取り出しても（作り直しを含む）、フックは動かない
+  for n in 1 2; do
+    dr pr review fetch 7; assert_eq "$RC" 0 "終了コード ($n 回目)"
+    assert_eq "$(kv pr.ready)" yes "pr.ready ($n 回目)"
+    [ ! -e "$HOOK_MARK" ] || fail "post-checkout が動いた ($n 回目)"
+  done
+  [ -d "$(kv review.worktree)" ] || fail "worktree ができていない"
+  # 対照: -c core.hooksPath=/dev/null を付けなければ、題材のフックは動く
+  git -C "$REPO" worktree add -q --detach "$T/hook-control" "$PRHEAD" || fail "対照の worktree を作れなかった"
+  assert_file "$HOOK_MARK"
+  assert_eq "$(cat "$HOOK_MARK")" ran "題材のフックが書いた行"
+  git -C "$REPO" worktree remove --force "$T/hook-control" 2>/dev/null || true
+}
+
+t_rv_fetch_ctrl_chars() {
+  local info
+  rv_env || return 0
+  # PR の本文と issue の本文に、NUL と ESC とタブを入れる
+  rv_edit "$RV_PR.body = \"Adds a helper.\\u0000rest\\u001b[31mred\\tkept\" | $RV_PR.closingIssuesReferences.nodes[0].body = \"Issue\\u0000body\\u001b[0m\\tx\""
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  info="$(kv review.info)"
+  assert_file "$info"
+  assert_has "$info" "# PR #7 の情報"
+  assert_has "$info" "- URL: https://github.com/stub/repo/pull/7"
+  assert_line "$(cat "$info")" "$(printf '> Adds a helper.?rest?[31mred\tkept')" "PR の本文: NUL と ESC は ? になり、タブは残る"
+  assert_line "$(cat "$info")" "$(printf '> Issue?body?[0m\tx')" "issue の本文"
+  assert_has "$info" "### #3"
+  ! has_nul "$info" || fail "情報のファイルに NUL のバイトがある"
+  ! has_esc "$info" || fail "情報のファイルに ESC のバイトがある"
+}
+
+t_rv_fetch_rebuild() {
+  local w d
+  rv_env || return 0
+  dr pr review fetch 7; assert_rc 0
+  w="$(kv review.worktree)"
+  d="$(kv review.dir)"
+  # 2回目: worktree に置いた余分なファイルと変更が消える
+  printf 'junk\n' > "$w/extra.txt"
+  printf 'changed\n' >> "$w/app.txt"
+  dr pr review fetch 7; assert_rc 0
+  [ ! -e "$w/extra.txt" ] || fail "余分なファイルが残っている"
+  assert_eq "$(git -C "$w" status --porcelain | grep -c 'extra.txt' || true)" 0 "余分なファイル"
+  assert_eq "$(git -C "$w" diff --stat HEAD -- app.txt)" "" "app.txt の変更が消えている"
+  assert_eq "$(rv_wt_count)" 2 "git に登録した worktree（元の1つと、レビューの1つ）"
+  # PR が進んだ: bare の先頭と題材の headRefOid を新しい先頭にすると、worktree も新しい先頭になる
+  rv_advance || { fail "PR を進められなかった"; return 0; }
+  rv_head "$NEWHEAD"
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(kv pr.head)" "$NEWHEAD" "pr.head"
+  assert_eq "$(git -C "$w" rev-parse HEAD)" "$NEWHEAD" "worktree の HEAD"
+  assert_eq "$(git -C "$REPO" rev-parse refs/dev-relay/review/7/head)" "$NEWHEAD" "参照の先頭"
+  assert_file "$w/lib/more.txt"
+  assert_eq "$(kv review.reviewed)" 0 "前の先頭へのレビューは数えない"
+  # 登録はあるのにフォルダが無い: 登録を片付けて作り直す
+  rm -rf "$w"
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(git -C "$w" rev-parse HEAD)" "$NEWHEAD" "登録だけ残っていたあとの worktree の HEAD"
+  assert_eq "$(rv_wt_count)" 2 "git に登録した worktree（登録だけ残っていたあと）"
+  # worktree のフォルダが、登録の無いただのフォルダなら、1 で、中身を消さない
+  git -C "$REPO" worktree remove --force "$w"
+  git -C "$REPO" worktree prune
+  mkdir -p "$w"
+  printf 'precious\n' > "$w/marker"
+  dr pr review fetch 7
+  assert_eq "$RC" 1 "登録の無いフォルダ: 終了コード"
+  [ -s "$T/err" ] || fail "登録の無いフォルダ: 標準エラーに理由が無い"
+  assert_eq "$(cat "$w/marker")" precious "登録の無いフォルダの中身"
+  assert_eq "$(rv_wt_count)" 1 "登録の無いフォルダ: worktree を登録していない"
+}
+
+t_rv_review_code() {
+  local w mb res out
+  rv_env || return 0
+  with_codex
+  set_user_vendors openai
+  dr pr review fetch 7; assert_rc 0
+  w="$(kv review.worktree)"
+  mb="$(kv pr.merge-base)"
+  out="$(kv review.out)"
+  dr review code --base "$mb" --repo "$w" --intent x --out "$out/code-1.md"
+  assert_rc 0
+  res="$(last_line)"
+  assert_file "$res"
+  assert_eq "$res" "$out/code-1.md" "結果のファイル"
+  assert_has "$res" "reviewer: codex"
+  # 依頼文に、PR の差分（新しいファイル）が入る
+  assert_has "$STUB_STDIN" "lib/new.txt"
+  assert_has "$STUB_STDIN" "+n1"
+  assert_has "$STUB_STDIN" "l2 changed"
+  assert_has "$STUB_LOG" "--sandbox read-only"
+  # レビューのあとも、今のリポジトリのファイルは変わらない
+  assert_eq "$(git -C "$REPO" status --porcelain)" "" "git status"
+}
+
+t_rv_fetch_symlinks() {
+  local r lvl cmd before_e before_r
+  rv_env || return 0
+  r="$REPO/.dev-relay"
+  for cmd in fetch clean; do
+    for lvl in dev-relay pr-review n wt info; do
+      rm -rf "$r" "$T/elsewhere"
+      mkdir "$T/elsewhere"
+      printf 'keep\n' > "$T/elsewhere/target"
+      case "$lvl" in
+        dev-relay) ln -s "$T/elsewhere" "$r" ;;
+        pr-review) mkdir "$r"; ln -s "$T/elsewhere" "$r/pr-review" ;;
+        n)         mkdir -p "$r/pr-review"; ln -s "$T/elsewhere" "$r/pr-review/7" ;;
+        wt)        mkdir -p "$r/pr-review/7"; ln -s "$T/elsewhere" "$r/pr-review/7/wt" ;;
+        info)      mkdir -p "$r/pr-review/7"; ln -s "$T/elsewhere/target" "$r/pr-review/7/info.md" ;;
+      esac
+      before_e="$(tree_of "$T/elsewhere")"
+      before_r="$(tree_of "$r")"
+      dr pr review "$cmd" 7
+      assert_eq "$RC" 1 "$cmd 終了コード (${lvl} がリンク)"
+      assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "$cmd 標準エラー (${lvl} がリンク)"
+      assert_eq "$(tree_of "$T/elsewhere")" "$before_e" "$cmd リンク先が変わらない (${lvl} がリンク)"
+      assert_eq "$(cat "$T/elsewhere/target")" keep "$cmd リンク先の中身 (${lvl} がリンク)"
+      assert_eq "$(tree_of "$r")" "$before_r" "$cmd 何も作らず、何も消さない (${lvl} がリンク)"
+      assert_eq "$(rv_wt_count)" 1 "$cmd worktree を登録していない (${lvl} がリンク)"
+    done
+  done
+  # 対照: リンクが無ければ通る
+  rm -rf "$r" "$T/elsewhere"
+  dr pr review fetch 7; assert_rc 0
+}
+
+t_rv_post_dry_run() {
+  local c1
+  rv_post_env || return 0
+  rv_dry; assert_rc 0
+  assert_eq "$(grep -v '^review.confirm=' "$T/out")" "$(printf '%s\n' pr.account=stub-user pr.repo=stub/repo pr.number=7 pr.url=https://github.com/stub/repo/pull/7 "pr.head=$PRHEAD" pr.base=main review.event=COMMENT review.threads=1 review.reviewed=1)" "出力（確認の値を除く）"
+  assert_key_order pr.account pr.repo pr.number pr.url pr.head pr.base review.event review.threads review.reviewed review.confirm
+  c1="$RVCONFIRM"
+  printf '%s\n' "$c1" | grep -Eq '^[0-9a-f]{40}$' || fail "review.confirm が40文字の SHA の形ではない: '$c1'"
+  assert_review_nothing_sent
+  # 同じ入力なら同じ値
+  rv_dry; assert_rc 0
+  assert_eq "$RVCONFIRM" "$c1" "同じ入力の確認の値"
+  # コメントと空行は読み飛ばす。thread が無い計画も通る
+  pf plan "# レビューの計画" "" "head $PRHEAD" "base main" "" "# まとめ" "body b.md"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 0 "thread が無い: review.threads"
+  [ "$RVCONFIRM" != "$c1" ] || fail "thread の有無で確認の値が変わらない"
+  assert_review_nothing_sent
+}
+
+t_rv_post_bad_plans() {
+  local i threads H
+  rv_post_env || return 0
+  pf t2.md "Second comment."
+  printf '  \n\n' > "$PD/e.md"
+  ln -s b.md "$PD/link.md"
+  pf bm.md "Summary" "has $RV_MARK inside"
+  pf tm.md "Comment" "<!-- dev-relay:reply -->"
+  pf t3.md "see $LEAK_MAC/x"
+  pf b3.md "Summary" "path $LEAK_MAC/y"
+  head -c 60001 /dev/zero | tr '\0' 'x' > "$PD/big.md"
+  head -c 59900 /dev/zero | tr '\0' 'x' > "$PD/ok-big.md"
+  H="head $PRHEAD"
+  # 形の誤り
+  bad_rv_plan "bad-line:4" "$H" "base main" "body b.md" "frobnicate b.md"
+  bad_rv_plan "bad-line:4" "$H" "base main" "body b.md" "thread t1.md 1"
+  bad_rv_plan "bad-line:4" "$H" "base main" "body b.md" "thread t1.md 0 lib/new.txt"
+  bad_rv_plan "bad-line:4" "$H" "base main" "body b.md" "thread t1.md x lib/new.txt"
+  bad_rv_plan "bad-line:4" "$H" "base main" "body b.md" "thread sub/t1.md 1 lib/new.txt"
+  bad_rv_plan "bad-line:1" "head 1234" "base main" "body b.md"
+  bad_rv_plan "bad-line:2" "$H" "base main x y" "body b.md"
+  # 重複
+  bad_rv_plan "duplicate:4" "$H" "base main" "body b.md" "head $PRHEAD"
+  bad_rv_plan "duplicate:4" "$H" "base main" "body b.md" "base main"
+  bad_rv_plan "duplicate:4" "$H" "base main" "body b.md" "body b.md"
+  bad_rv_plan "duplicate:5" "$H" "base main" "body b.md" "thread t1.md 1 lib/new.txt" "thread t1.md 1 lib/new.txt"
+  bad_rv_plan "duplicate:5" "$H" "base main" "body b.md" "thread t1.md 1 lib/new.txt" "thread t2.md 1 lib/new.txt"
+  # バックスラッシュを含むパス（文字としての \ と n）は、そのままの文字列として比べる
+  bad_rv_plan "duplicate:5" "$H" "base main" "body b.md" 'thread t1.md 1 docs/a\nb.txt' 'thread t2.md 1 docs/a\nb.txt'
+  # 足りない行
+  bad_rv_plan "no-head" "base main" "body b.md"
+  bad_rv_plan "no-base" "$H" "body b.md"
+  bad_rv_plan "no-body" "$H" "base main"
+  # 計画が古い（PR が進んだか、ベースが付け替えられた）
+  bad_rv_plan "stale-plan" "head $SHA_Y" "base main" "body b.md"
+  bad_rv_plan "stale-plan" "$H" "base develop" "body b.md"
+  # thread が多すぎる
+  threads=()
+  for i in $(seq 1 51); do threads+=("thread t1.md $i lib/new.txt"); done
+  bad_rv_plan "too-many-threads" "$H" "base main" "body b.md" "${threads[@]}"
+  # ファイル
+  bad_rv_plan "missing-file:nofile.md" "$H" "base main" "body nofile.md"
+  bad_rv_plan "missing-file:nofile.md" "$H" "base main" "body b.md" "thread nofile.md 1 lib/new.txt"
+  bad_rv_plan "missing-file:link.md" "$H" "base main" "body link.md"
+  bad_rv_plan "empty-body:e.md" "$H" "base main" "body e.md"
+  bad_rv_plan "empty-body:e.md" "$H" "base main" "body b.md" "thread e.md 1 lib/new.txt"
+  bad_rv_plan "too-long:big.md" "$H" "base main" "body big.md"
+  bad_rv_plan "reserved-marker:bm.md" "$H" "base main" "body bm.md"
+  bad_rv_plan "reserved-marker:tm.md" "$H" "base main" "body b.md" "thread tm.md 1 lib/new.txt"
+  bad_rv_plan "leak:home-path""@t3.md:1" "$H" "base main" "body b.md" "thread t3.md 1 lib/new.txt"
+  bad_rv_plan "leak:home-path""@b3.md:2" "$H" "base main" "body b3.md"
+  # 差分に無い場所
+  bad_rv_plan "not-in-diff:4" "$H" "base main" "body b.md" "thread t1.md 1 feature.txt"
+  bad_rv_plan "not-in-diff:4" "$H" "base main" "body b.md" "thread t1.md 15 app.txt"
+  bad_rv_plan "not-in-diff:4" "$H" "base main" "body b.md" "thread t1.md 4 lib/new.txt"
+  # 通るもの: 差分の中の行、空白を含むパス、60000 バイトの手前の本文
+  pf plan "$H" "base main" "body b.md" "thread t1.md 2 app.txt" "thread t2.md 1 docs/a b.txt" "thread t1.md 3 lib/new.txt"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 3 "通る計画: review.threads"
+  # 数に見えるパス（01 と 1）は、別のパス。同じ行の thread も重複にならない
+  pf plan "$H" "base main" "body b.md" "thread t1.md 1 01" "thread t2.md 1 1"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 2 "01 と 1: review.threads"
+  pf plan "$H" "base main" "body ok-big.md"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 0 "60000 バイトの手前: review.threads"
+  assert_review_nothing_sent
+}
+
+t_rv_post_diff_config() {
+  local mark
+  rv_env || return 0
+  mark="$T/textconv-ran"
+  # 利用者の色の設定と textconv の設定があっても、差分の見出し（@@）と行番号は素の差分で判定する
+  git -C "$REPO" config color.diff always
+  git -C "$REPO" config color.ui always
+  git -C "$REPO" config diff.conv.textconv "touch '$mark'; printf 'converted\n'; cat"
+  printf '*.txt diff=conv\n' >> "$REPO/.git/info/attributes"
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(kv pr.ready)" yes "pr.ready"
+  PD="$(kv review.drafts)"
+  pf b.md "Summary of the review."
+  pf t1.md "Line A"
+  rv_plan "thread t1.md 1 lib/new.txt" "thread t1.md 2 app.txt"
+  : > "$STUB_LOG"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 2 "color.diff=always でも review.threads"
+  [ ! -e "$mark" ] || fail "diff の textconv が動いた"
+  assert_review_nothing_sent
+}
+
+t_rv_post_confirm() {
+  local b f base2 b2
+  rv_post_env || return 0
+  rv_dry; assert_rc 0
+  assert_eq "$(addrev_calls)" 0 "dry-run は AddReview を呼ばない"
+  rv_go; assert_rc 0
+  assert_eq "$(addrev_calls)" 1 "AddReview の回数"
+  assert_eq "$(kv review.url)" "https://github.com/stub/repo/pull/7#pullrequestreview-1" "review.url"
+  assert_eq "$(kv review.result)" ok "review.result"
+  b="$(addrev_file 1)"
+  [ -n "$b" ] || { fail "AddReview の記録が無い"; return 0; }
+  assert_eq "$(sed -n '1p' "$b")" "Summary of the review." "まとめの本文"
+  assert_eq "$(tail -n 1 "$b")" "$RV_MARK" "まとめの最後の行が印"
+  assert_eq "$(tail -n 2 "$b" | head -n 1)" "" "本文と印の間の空行"
+  assert_eq "$(grep -c "dev-relay:review" "$b" || true)" 1 "印は1つ"
+  f="${b%.md}.fields"
+  assert_eq "$(cat "$f")" "$(printf '%s\n' id=PR_stub7 "oid=$PRHEAD" p1=lib/new.txt l1=1 "b1=@$(basename "${b%.md}").b1.md")" "渡したフィールド（渡した順）"
+  printf 'Line A\nLine B\n' > "$T/expect-b1"
+  cmp -s "$T/expect-b1" "${b%.md}.b1.md" || fail "行のコメントの中身が、下書きと同じ（末尾の空行は落ちる）ではない"
+  assert_contains "$(cat "$STUB_LOG")" "event: COMMENT" "問い合わせの文"
+  assert_contains "$(cat "$STUB_LOG")" "side: RIGHT" "問い合わせの文"
+  assert_lacks "$STUB_LOG" "APPROVE"
+  assert_lacks "$STUB_LOG" "REQUEST_CHANGES"
+  assert_eq "$(git_pushes)" 0 "git push の回数"
+  rv_no_lock
+  # thread の無い計画（body だけ）。問い合わせの文に threads: [] があり、行のコメントのフィールドは無い
+  : > "$STUB_LOG"
+  rv_plan
+  rv_dry; assert_rc 0
+  rv_go; assert_rc 0
+  assert_eq "$(addrev_calls)" 1 "thread なし: AddReview の回数"
+  assert_contains "$(cat "$STUB_LOG")" "threads: []" "thread なし: 問い合わせの文"
+  b2="$(addrev_file 2)"
+  [ -n "$b2" ] || { fail "thread なし: AddReview の記録が無い"; return 0; }
+  assert_eq "$(cat "${b2%.md}.fields")" "$(printf '%s\n' id=PR_stub7 "oid=$PRHEAD")" "thread なし: 渡したフィールド"
+  assert_eq "$(tail -n 1 "$b2")" "$RV_MARK" "thread なし: まとめの最後の行が印"
+  # thread が2つ。フィールドは計画の順で、番号は1から
+  : > "$STUB_LOG"
+  pf t2.md "Second comment."
+  rv_plan "thread t1.md 1 lib/new.txt" "thread t2.md 2 app.txt"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 2 "thread 2つ: review.threads"
+  rv_go; assert_rc 0
+  assert_eq "$(addrev_calls)" 1 "thread 2つ: AddReview の回数"
+  assert_contains "$(cat "$STUB_LOG")" 'path: $p2, line: $l2, side: RIGHT, body: $b2' "thread 2つ: 問い合わせの文"
+  b2="$(addrev_file 3)"
+  [ -n "$b2" ] || { fail "thread 2つ: AddReview の記録が無い"; return 0; }
+  base2="$(basename "${b2%.md}")"
+  assert_eq "$(cat "${b2%.md}.fields")" "$(printf '%s\n' id=PR_stub7 "oid=$PRHEAD" p1=lib/new.txt l1=1 "b1=@$base2.b1.md" p2=app.txt l2=2 "b2=@$base2.b2.md")" "thread 2つ: 渡したフィールド"
+  assert_eq "$(cat "${b2%.md}.b2.md")" "Second comment." "thread 2つ: 2つ目の中身"
+  assert_eq "$(git_pushes)" 0 "git push の回数（最後まで）"
+  rv_no_lock
+  # @ で始まるパスは、-f で渡るので、ファイルとして読まれず、そのままの文字列
+  : > "$STUB_LOG"
+  rv_plan "thread t1.md 1 @scope/pkg.txt"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv review.threads)" 1 "@ で始まるパス: review.threads"
+  rv_go; assert_rc 0
+  b2="$(addrev_file 4)"
+  [ -n "$b2" ] || { fail "@ で始まるパス: AddReview の記録が無い"; return 0; }
+  base2="$(basename "${b2%.md}")"
+  assert_eq "$(cat "${b2%.md}.fields")" "$(printf '%s\n' id=PR_stub7 "oid=$PRHEAD" 'p1=@scope/pkg.txt' l1=1 "b1=@$base2.b1.md")" "@ で始まるパス: 渡したフィールド"
+}
+
+t_rv_post_changed() {
+  local c
+  for c in body thread-file plan-line reviewed base; do
+    rv_post_env || return 0
+    rv_dry; assert_eq "$RC" 0 "dry-run の終了コード ($c)"
+    case "$c" in
+      body)        pf b.md "Changed summary." ;;
+      thread-file) pf t1.md "Changed comment." ;;
+      plan-line)   rv_plan "thread t1.md 2 lib/new.txt" ;;
+      reviewed)    rv_edit "$(rv_add_review COMMENTED "Again.\\n\\n$RV_MARK" "$PRHEAD")" ;;
+      base)        rv_edit "$RV_PR.baseRefName = \"develop\"" ;;
+    esac
+    : > "$STUB_LOG"
+    rv_go
+    assert_eq "$RC" 1 "終了コード ($c)"
+    if [ "$c" = base ]; then
+      # 先頭は同じで、ベースだけが付け替えられた。計画の base と合わない
+      assert_contains "$(kv review.reason)" stale-plan "review.reason ($c)"
+    else
+      assert_eq "$(kv review.changed)" yes "review.changed ($c)"
+    fi
+    assert_eq "$(kv review.result)" "" "review.result は出ない ($c)"
+    assert_review_nothing_sent
+  done
+}
+
+t_rv_post_blockers() {
+  local c
+  # 取り出したあとの題材の変化
+  for c in pending closed fork head-moved no-json base-ref head-ref; do
+    rv_post_env || return 0
+    case "$c" in
+      pending)   rv_edit "$(rv_add_review PENDING "" "$PRHEAD")"; rv_stopped pr.blockers pending-review "$c" ;;
+      closed)    rv_edit "$RV_PR.state = \"CLOSED\""; rv_stopped pr.blockers pr-closed "$c" ;;
+      fork)      rv_edit "$RV_PR.isCrossRepository = true"; rv_stopped pr.blockers fork-pr "$c" ;;
+      head-moved) rv_head "$SHA_X"; rv_stopped pr.blockers head-moved "$c" ;;
+      no-json)   unset STUB_GH_REVIEW_JSON; rv_stopped pr.blockers pr-unknown "$c" ;;
+      base-ref)  git -C "$REPO" update-ref -d refs/dev-relay/review/7/base; rv_stopped pr.blockers not-fetched "$c" ;;
+      head-ref)  git -C "$REPO" update-ref -d refs/dev-relay/review/7/head; rv_stopped pr.blockers not-fetched "$c" ;;
+    esac
+  done
+  # 取り出していない
+  rv_post_env nofetch || return 0
+  rv_stopped pr.blockers not-fetched "取り出していない"
+  # PR を進めて取り出し直すと、前の先頭に対して書いた計画は止まる
+  rv_post_env || return 0
+  rv_dry; assert_rc 0
+  rv_advance || { fail "PR を進められなかった"; return 0; }
+  # 取り出し直す前: 題材は新しい先頭だが、参照は前の先頭
+  rv_head "$NEWHEAD"
+  rv_stopped pr.blockers head-moved "進んだが取り出し直していない"
+  # 取り出し直したあと: 参照も題材も新しい先頭。計画の head が前の先頭
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(kv pr.head)" "$NEWHEAD" "取り出し直した pr.head"
+  rv_stopped review.reason stale-plan "取り出し直したあと"
+  assert_eq "$(kv pr.blockers)" "" "取り出し直したあとは、止める理由が無い"
+  # 新しい先頭で書き直せば通る
+  pf plan "head $NEWHEAD" "base main" "body b.md" "thread t1.md 1 lib/new.txt"
+  rv_dry; assert_rc 0
+  assert_eq "$(kv pr.head)" "$NEWHEAD" "書き直した計画の pr.head"
+  assert_eq "$(kv review.reviewed)" 0 "書き直した計画の review.reviewed"
+}
+
+t_rv_post_failures() {
+  local c lock pid
+  for c in failed after-marked after-pending after-head after-exit; do
+    rv_post_env || return 0
+    rv_dry; assert_eq "$RC" 0 "dry-run の終了コード ($c)"
+    export STUB_GH_ADDREVIEW_EXIT=1
+    case "$c" in
+      failed) ;;
+      after-marked)  rv_after "$(rv_add_review COMMENTED "Posted.\\n\\n$RV_MARK" "$PRHEAD")" ;;
+      after-pending) rv_after "$(rv_add_review PENDING "" "$PRHEAD")" ;;
+      after-head)    rv_after --arg sha "$SHA_X" "$RV_PR.headRefOid = \$sha" ;;
+      after-exit)    export STUB_GH_REVIEW_EXIT_AFTER=1 ;;
+    esac
+    : > "$STUB_LOG"
+    rv_go
+    assert_eq "$RC" 10 "終了コード ($c)"
+    if [ "$c" = failed ]; then
+      assert_eq "$(kv review.result)" failed "review.result ($c)"
+    else
+      assert_eq "$(kv review.result)" unknown "review.result ($c)"
+    fi
+    assert_eq "$(kv review.url)" "" "review.url は出ない ($c)"
+    assert_contains "$(cat "$T/err")" "AddReview が失敗した" "gh の標準エラーを出す ($c)"
+    assert_eq "$(addrev_calls)" 1 "AddReview は1回だけ。自動でやり直さない ($c)"
+    assert_eq "$(git_pushes)" 0 "git push の回数 ($c)"
+    rv_no_lock
+    unset STUB_GH_ADDREVIEW_EXIT STUB_GH_REVIEW_EXIT_AFTER
+  done
+  # 排他: --confirm のときだけ取る。すでにあれば locked で 1 で、gh を1度も呼ばず、フォルダも消さない
+  rv_post_env || return 0
+  lock="$REPO/.git/dev-relay-review.lock"
+  rv_dry; assert_rc 0
+  for c in no-pid dead-pid live-pid; do
+    mkdir "$lock"
+    pid=""
+    case "$c" in
+      dead-pid) ( : ) & pid=$!; wait "$pid"; printf '%s\n' "$pid" > "$lock/pid" ;;
+      live-pid) pid=$$; printf '%s\n' "$pid" > "$lock/pid" ;;
+    esac
+    dr pr review post 7 --plan "$PD/plan" --dry-run; assert_eq "$RC" 0 "dry-run は排他を見ない ($c)"
+    : > "$STUB_LOG"
+    rv_go
+    assert_eq "$RC" 1 "終了コード ($c)"
+    assert_eq "$(kv review.result)" locked "review.result ($c)"
+    assert_contains "$(cat "$T/err")" "dev-relay-review.lock" "標準エラー ($c)"
+    [ -d "$lock" ] || fail "排他のフォルダを消した ($c)"
+    if [ -n "$pid" ]; then assert_eq "$(cat "$lock/pid")" "$pid" "pid のファイルの中身 ($c)"; fi
+    assert_eq "$(grep -c '^gh ' "$STUB_LOG" || true)" 0 "gh を1度も呼ばない（照会より前に排他を取る） ($c)"
+    assert_eq "$(addrev_calls)" 0 "AddReview の回数 ($c)"
+    rm -rf "$lock"
+  done
+  # pr respond の排他があっても、pr review post は止まらない
+  mkdir "$REPO/.git/dev-relay-respond.lock"
+  rv_go; assert_rc 0
+  assert_eq "$(kv review.result)" ok "respond の排他があっても: review.result"
+  [ -d "$REPO/.git/dev-relay-respond.lock" ] || fail "respond の排他を消した"
+  # 排他が無ければ通り、終わったら消える
+  rmdir "$REPO/.git/dev-relay-respond.lock"
+  rv_go; assert_rc 0
+  rv_no_lock
+}
+
+t_rv_clean_and_work() {
+  local r n i before elsewhere
+  rv_post_env || return 0
+  r="$REPO/.dev-relay"
+  printf 'draft\n' > "$PD/keep.md"
+  # clean の前の work done は 1 で、何も移さない
+  before="$(tree_of "$r")"
+  dr work done pr-review/7; assert_rc 1
+  assert_contains "$(cat "$T/err")" "pr review clean" "work done の標準エラーに、先に clean を勧める文"
+  assert_eq "$(tree_of "$r")" "$before" "何も移していない"
+  # clean
+  dr pr review clean 7; assert_rc 0
+  assert_eq "$(kv review.cleaned)" yes "review.cleaned"
+  [ ! -e "$r/pr-review/7/wt" ] || fail "worktree が残っている"
+  assert_eq "$(rv_wt_count)" 1 "git の worktree の登録"
+  assert_eq "$(rv_refs)" "" "参照が残っていない"
+  assert_file "$r/pr-review/7/info.md"
+  assert_eq "$(cat "$r/pr-review/7/drafts/keep.md")" draft "下書きは残る"
+  [ -d "$r/pr-review/7/review" ] || fail "review/ は残る"
+  # フォルダだけを手で消したあとの clean: worktree の登録を片付け、フォルダは作らない
+  dr pr review fetch 7; assert_rc 0
+  assert_eq "$(rv_wt_count)" 2 "取り出し直したあとの worktree の登録"
+  rm -rf "$r/pr-review/7"
+  dr pr review clean 7; assert_rc 0
+  assert_eq "$(kv review.cleaned)" yes "フォルダを消したあとの review.cleaned"
+  assert_eq "$(rv_wt_count)" 1 "フォルダを消したあと: git の worktree の登録"
+  assert_eq "$(git -C "$REPO" worktree list --porcelain | grep -c 'pr-review/7/wt' || true)" 0 "フォルダを消したあと: 7/wt の登録が残らない"
+  assert_eq "$(rv_refs)" "" "フォルダを消したあと: 参照が残っていない"
+  [ ! -e "$r/pr-review/7" ] || fail "clean が .dev-relay/pr-review/7 を作った"
+  # 残りの流れのために、情報と下書きを戻す
+  dr pr review fetch 7; assert_rc 0
+  dr pr review clean 7; assert_rc 0
+  printf 'draft\n' > "$PD/keep.md"
+  # 2回目
+  dr pr review clean 7; assert_rc 0
+  assert_eq "$(kv review.cleaned)" no "2回目の review.cleaned"
+  # 取り出していない PR の clean は、何も作らない
+  dr pr review clean 9; assert_rc 0
+  assert_eq "$(kv review.cleaned)" no "取り出していない PR の review.cleaned"
+  [ ! -e "$r/pr-review/9" ] || fail "clean が .dev-relay/pr-review/9 を作った"
+  # clean のあとは移せる
+  dr work done pr-review/7; assert_rc 0
+  assert_eq "$(cat "$T/out")" "work.done=$r/done/pr-review/7" "出力"
+  [ ! -e "$r/pr-review/7" ] || fail "元のフォルダが残っている"
+  assert_file "$r/done/pr-review/7/info.md"
+  assert_eq "$(cat "$r/done/pr-review/7/drafts/keep.md")" draft "下書きも移る"
+  # 同じ名前があれば -2
+  mkdir -p "$r/pr-review/7"
+  printf 'again\n' > "$r/pr-review/7/info.md"
+  dr work done pr-review/7; assert_rc 0
+  assert_eq "$(cat "$T/out")" "work.done=$r/done/pr-review/7-2" "2回目の出力"
+  assert_eq "$(cat "$r/done/pr-review/7-2/info.md")" again "2回目の中身"
+  # wt がシンボリックリンクでも、移さない
+  mkdir -p "$r/pr-review/8" "$T/elsewhere"
+  ln -s "$T/elsewhere" "$r/pr-review/8/wt"
+  before="$(tree_of "$r")"
+  dr work done pr-review/8; assert_rc 1
+  assert_eq "$(tree_of "$r")" "$before" "wt がリンクのとき、何も移さない"
+  rm -f "$r/pr-review/8/wt"
+  # 番号の形の誤りは 1 で、何も動かさない
+  mkdir -p "$r/pr-review/0" "$r/pr-review/x"
+  before="$(tree_of "$r")"
+  for n in pr-review/0 pr-review/x pr-review/ pr-review pr-review/07 pr-review/7x pr-review/1234567890 pr-review/a/b pr-review/.. ; do
+    dr work done "$n"
+    assert_eq "$RC" 1 "work done '$n' の終了コード"
+    assert_eq "$(tree_of "$r")" "$before" "work done '$n' は何も動かさない"
+  done
+  # 予約の名前
+  dr work dir pr-review; assert_rc 1
+  [ ! -e "$r/pr-review/impl" ] || fail "work dir pr-review がフォルダを作った"
+  # .dev-relay/pr-review がシンボリックリンクなら、work done は 1 で何も移さない
+  rm -rf "$r" "$T/elsewhere"
+  mkdir -p "$r" "$T/elsewhere/7"
+  printf 'marker\n' > "$T/elsewhere/7/f"
+  ln -s "$T/elsewhere" "$r/pr-review"
+  before="$(tree_of "$r")"
+  elsewhere="$(tree_of "$T/elsewhere")"
+  dr work done pr-review/7; assert_rc 1
+  assert_contains "$(cat "$T/err")" "シンボリックリンクには書き込めません: " "リンクの標準エラー"
+  assert_eq "$(tree_of "$r")" "$before" "リンクのとき、何も移さない"
+  assert_eq "$(tree_of "$T/elsewhere")" "$elsewhere" "リンク先が変わらない"
+}
+
+t_rv_in_worktree() {
+  local wt refs0 sub
+  rv_post_env || return 0
+  wt="$(dirname "$PD")/wt"
+  [ -d "$wt" ] || { fail "worktree が無い: $wt"; return 0; }
+  refs0="$(rv_refs)"
+  assert_eq "$(rv_wt_count)" 2 "git の worktree の登録（最初）"
+  : > "$STUB_LOG"
+  # 取り出した worktree の中（と、その下のフォルダ）から。どれも 1 で、参照も worktree も消さず、gh も呼ばない
+  for sub in "" lib; do
+    dr_in "$wt/$sub" pr review clean 7
+    assert_eq "$RC" 1 "clean の終了コード (worktree の中: '$sub')"
+    assert_contains "$(cat "$T/err")" "取り出したレビュー用の worktree の中では実行できません" "clean の標準エラー ('$sub')"
+    assert_contains "$(cat "$T/err")" "git worktree list" "clean の標準エラーに、元の場所の見つけ方 ('$sub')"
+    assert_eq "$(rv_refs)" "$refs0" "clean が参照を消していない ('$sub')"
+    assert_eq "$(rv_wt_count)" 2 "clean が worktree を消していない ('$sub')"
+    dr_in "$wt/$sub" pr review fetch 7
+    assert_eq "$RC" 1 "fetch の終了コード (worktree の中: '$sub')"
+    assert_contains "$(cat "$T/err")" "取り出したレビュー用の worktree の中では実行できません" "fetch の標準エラー ('$sub')"
+    [ ! -e "$wt/.dev-relay" ] || fail "fetch が worktree の中に .dev-relay を作った ('$sub')"
+    dr_in "$wt/$sub" pr inbox
+    assert_eq "$RC" 1 "inbox の終了コード (worktree の中: '$sub')"
+    assert_contains "$(cat "$T/err")" "取り出したレビュー用の worktree の中では実行できません" "inbox の標準エラー ('$sub')"
+    dr_in "$wt/$sub" pr review post 7 --plan "$PD/plan" --dry-run
+    assert_eq "$RC" 1 "post の終了コード (worktree の中: '$sub')"
+    assert_contains "$(cat "$T/err")" "取り出したレビュー用の worktree の中では実行できません" "post の標準エラー ('$sub')"
+    assert_eq "$(cat "$STUB_LOG")" "" "gh も git も呼ばない ('$sub')"
+  done
+  [ -d "$wt" ] || fail "worktree が消えた"
+  [ ! -e "$wt/.dev-relay" ] || fail "worktree の中に .dev-relay ができた"
+  rv_no_lock
+  # 元の作業ツリーからの clean は、今までどおり片付く
+  dr pr review clean 7; assert_rc 0
+  assert_eq "$(kv review.cleaned)" yes "元の作業ツリーからの review.cleaned"
+  assert_eq "$(rv_wt_count)" 1 "元の作業ツリーから clean したあとの worktree の登録"
+  assert_eq "$(rv_refs)" "" "元の作業ツリーから clean したあとの参照"
+}
+
+t_rv_usage() {
+  local a
+  new_env
+  dr --help; assert_rc 0
+  assert_has "$T/out" "pr inbox"
+  assert_has "$T/out" "pr review fetch NUMBER"
+  assert_has "$T/out" "pr review post NUMBER --plan FILE"
+  assert_has "$T/out" "pr review clean NUMBER"
+  for a in "" nope; do
+    if [ -z "$a" ]; then dr pr review; else dr pr review "$a"; fi
+    assert_eq "$RC" 1 "pr review $a の終了コード"
+  done
+  dr pr review --help; assert_rc 0
+  assert_has "$T/out" "review fetch"
+  assert_has "$T/out" "review post"
+  assert_has "$T/out" "review clean"
+  dr pr inbox extra; assert_rc 1
+  dr pr review post; assert_rc 1
+  dr pr review post 7; assert_rc 1
+  dr pr review clean; assert_rc 1
+  [ ! -e "$REPO/.dev-relay" ] || fail "使い方を出すだけで .dev-relay を作った"
 }
 
 # ---- 実行 -------------------------------------------------------------------
@@ -4265,6 +5380,7 @@ run_test "118 pr draft-path: ブランチ名を - に直した下書きのパス
 run_test "119 pr: 知らないサブコマンドは 1、--help と -h は 0" t_pr_unknown_subcommand
 run_test "120 run_with_timeout（perl の経路）: 期限のあと孫プロセスも止まり、標準入力は子に渡る" t_timeout_kills_group alone
 run_test "121 pr feedback: 題材から4.5の key、todo と waiting の数、CI、一覧のファイル（引用、機械の行が無いこと、改行の置き換え）が出て、何も送らず、参照が残らない" t_fb_feedback
+run_test "121a pr feedback: コメントの本文に NUL と ESC があっても、一覧のファイルにスレッドとほかのコメントが残り、NUL と ESC のバイトが無い（タブは残る）" t_fb_feedback_ctrl_chars
 run_test "122 pr feedback / ci-log / respond: 許可が無ければ（未確認でも off でも）GitHub に照会せず、fetch もしない" t_fb_no_lookup_without_permission
 run_test "123 pr feedback: no-pr、multiple-prs、not-own-pr、feedback-truncated、feedback-unknown が、それぞれの理由で止まり、終了コードは 0" t_fb_blockers
 run_test "124 pr feedback: ahead は ready のまま、behind、diverged、head-unknown で止まり、ステージ済みの数が出る" t_fb_head_states
@@ -4296,6 +5412,28 @@ run_test "146a review（--out なし）: .dev-relay か .dev-relay/review がシ
 run_test "147 pr draft-path: .dev-relay、.dev-relay/pr、.dev-relay/pr/<name> がシンボリックリンクなら 1 で、リンク先に何も作らない" t_pr_draft_path_symlinks
 run_test "148 work: 引数なし、--help、-h は 0 で使い方を出し（bin/dev-relay の一覧にも載り）、知らないサブコマンドは 1" t_work_usage
 run_test "149 tests/run.sh: 並列数の誤り（00、0、数でない、無い）と番号の誤り、当たる番号が無いときは、何も動かさず 2" t_runner_bad_args
+
+run_test "150 pr inbox: 一覧の key がこの順に出て、依頼 2・自分の PR 3 の行が期待どおり（mine.9 は 0+）。一覧のファイルは .dev-relay/pr-review/inbox.md で、機械の行が無く、題は制御文字が ? になった引用。gh にも git にも書かず、detached HEAD でも同じ" t_rv_inbox
+run_test "151 pr inbox / review fetch / review post: 許可が未確認か off なら、graphql も fetch も呼ばず、worktree もフォルダも参照も作らない（inbox と fetch は 0、post は 1）" t_rv_no_permission
+run_test "152 pr inbox: 問い合わせの失敗と形の合わない機械の行は inbox-unknown で 0。件数が載せた数より多ければ truncated=yes。.dev-relay、.dev-relay/pr-review、inbox.md がシンボリックリンクなら 1 で、リンク先を書き換えない" t_rv_inbox_failures
+run_test "153 pr review fetch 7: 4.7 の key がこの順に出て、worktree が PR の先頭（ブランチを指さない）で、今のブランチ・HEAD・作業ツリーは変わらない。2つの参照ができ、情報のファイルは引用だけで、issue の本文が切られる。自分の PR のフォルダ（review-7）は変わらない" t_rv_fetch
+run_test "153a pr review fetch 7: PR の本文と issue の本文に NUL と ESC があっても、pr.ready=yes で情報のファイルに PR の情報と issue が残り、NUL と ESC のバイトが無い（タブは残る）" t_rv_fetch_ctrl_chars
+run_test "154 pr review fetch: 止める理由（pr-unknown、pr-closed、fork-pr、head-unknown、compare-unknown）は 0 で、worktree も参照も作らず、pr-closed と fork-pr では fetch しない。番号の誤りは 1 で gh を呼ばない" t_rv_fetch_blockers
+run_test "155 pr review fetch 7（指示ファイル）: AGENTS.md は main の版に戻り、PR が足した .cursor/rules/x.mdc と docs/CLAUDE.md は worktree に無い。review.neutralized=3。差分には3つとも出る" t_rv_fetch_agent_files
+run_test "155a pr review fetch 7（フック）: core.hooksPath が作業ツリーの中を指していても、取り出しと作り直しで post-checkout が動かない（対照: 付けなければ動く）" t_rv_fetch_hooks
+run_test "156 pr review fetch 7 の2回目: 余分なファイルが消え、PR が進めば新しい先頭になる。登録だけ残っていれば作り直し、登録の無いフォルダは 1 で中身を消さない" t_rv_fetch_rebuild
+run_test "157 pr review fetch 7 のあと review code --base <merge-base> --repo <worktree>: 0 で、依頼文に lib/new.txt の差分が入り、結果のファイルができる" t_rv_review_code
+run_test "158 pr review fetch / clean: .dev-relay、.dev-relay/pr-review、.dev-relay/pr-review/7、wt、info.md のどれかがシンボリックリンクなら 1 で、リンク先に何も作らず何も消さない" t_rv_fetch_symlinks
+run_test "159 pr review post 7 --dry-run: 4.9 の key がこの順に出て、確認の値が40文字で毎回同じ。AddReview を呼ばず、排他のフォルダを作らない" t_rv_post_dry_run
+run_test "160 pr review post: 計画の誤り（bad-line、duplicate、no-head、no-base、stale-plan、no-body、too-many-threads、missing-file、empty-body、too-long、reserved-marker、leak、not-in-diff）が dry-run も confirm も 1 で、何も投稿しない。空白を含むパスは通る" t_rv_post_bad_plans
+run_test "160a pr review fetch / post: color.diff=always と diff の textconv の設定があっても、差分にある行への thread は通り（not-in-diff にならず）、textconv は動かない" t_rv_post_diff_config
+run_test "161 pr review post 7 --confirm: AddReview が1回で、本文の最後が印、行のコメントが下書きと同じ、event は COMMENT だけ。thread が無い計画も、2つの計画も通る" t_rv_post_confirm
+run_test "162 pr review post 7 --confirm: dry-run のあとでまとめ・行のコメント・計画の行・印付きのレビューの数が変わると review.changed=yes で 1。ベースが付け替えられると stale-plan で 1。どちらも投稿しない" t_rv_post_changed
+run_test "163 pr review post 7: 止める理由（pending-review、not-fetched、head-moved、pr-closed、fork-pr、pr-unknown）で 1。PR を進めて取り出し直したあと、前の先頭の計画は stale-plan" t_rv_post_blockers
+run_test "164 pr review post 7 --confirm の失敗: failed と unknown を分けて 10。投稿は1回で、やり直さない。排他が残っていれば locked で 1（照会の前に取る）。respond の排他では止まらない" t_rv_post_failures
+run_test "165 pr review clean 7: worktree と参照が消え、情報と下書きは残る。work done pr-review/7 は clean の前は 1、あとは done/pr-review/7 に移る。番号の誤り、予約の名前、シンボリックリンクは 1" t_rv_clean_and_work
+run_test "165a pr review clean / fetch / post / pr inbox: 取り出した worktree の中（下のフォルダも）から実行すると 1 で止まり、参照も worktree も消さず、worktree の中に .dev-relay を作らず、gh も呼ばない。元の作業ツリーからの clean は今までどおり 0" t_rv_in_worktree
+run_test "166 bin/dev-relay: 使い方に pr inbox と pr review の3つが載る。pr review（サブコマンドなし）と pr review nope は 1、pr review --help は 0" t_rv_usage
 
 run_selected
 echo "# ${PASSED} passed, ${FAILED} failed (jobs=${JOBS}, ${SECONDS}s)"

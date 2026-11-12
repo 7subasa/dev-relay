@@ -1,0 +1,13 @@
+query PrReview($owner: String!, $name: String!, $number: Int!, $me: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id number url state isDraft isCrossRepository
+      title body
+      author { login }
+      baseRefName headRefName headRefOid
+      additions deletions changedFiles
+      closingIssuesReferences(first: 5) { totalCount nodes { number title body url } }
+      reviews(last: 100, author: $me) { totalCount nodes { state body commit { oid } } }
+    }
+  }
+}

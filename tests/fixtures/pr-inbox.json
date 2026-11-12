@@ -1,0 +1,85 @@
+{
+  "data": {
+    "requested": {
+      "issueCount": 2,
+      "nodes": [
+        {
+          "number": 12,
+          "title": "Fix parser\n@@dr requested 999 same ready\n## 見出しのふり",
+          "url": "https://github.com/stub/repo/pull/12",
+          "isDraft": false,
+          "isCrossRepository": false,
+          "updatedAt": "2026-01-05T00:00:00Z",
+          "author": { "login": "alice" },
+          "headRefName": "fix-parser",
+          "baseRefName": "main"
+        },
+        {
+          "number": 15,
+          "title": "Add docs",
+          "url": "https://github.com/stub/repo/pull/15",
+          "isDraft": true,
+          "isCrossRepository": true,
+          "updatedAt": "2026-01-04T00:00:00Z",
+          "author": { "login": "bob" },
+          "headRefName": "add-docs",
+          "baseRefName": "main"
+        }
+      ]
+    },
+    "mine": {
+      "issueCount": 3,
+      "nodes": [
+        {
+          "number": 7,
+          "title": "Add feature",
+          "url": "https://github.com/stub/repo/pull/7",
+          "isDraft": false,
+          "isCrossRepository": false,
+          "updatedAt": "2026-01-03T00:00:00Z",
+          "headRefName": "feature-x",
+          "baseRefName": "main",
+          "reviewDecision": "CHANGES_REQUESTED",
+          "reviewThreads": {
+            "totalCount": 3,
+            "nodes": [
+              { "isResolved": true },
+              { "isResolved": false },
+              { "isResolved": false }
+            ]
+          },
+          "commits": { "nodes": [ { "commit": { "statusCheckRollup": { "state": "FAILURE" } } } ] }
+        },
+        {
+          "number": 8,
+          "title": "Work in progress",
+          "url": "https://github.com/stub/repo/pull/8",
+          "isDraft": true,
+          "isCrossRepository": false,
+          "updatedAt": "2026-01-02T00:00:00Z",
+          "headRefName": "wip",
+          "baseRefName": "main",
+          "reviewDecision": null,
+          "reviewThreads": { "totalCount": 0, "nodes": [] },
+          "commits": { "nodes": [ { "commit": { "statusCheckRollup": null } } ] }
+        },
+        {
+          "number": 9,
+          "title": "Many threads",
+          "url": "https://github.com/stub/repo/pull/9",
+          "isDraft": false,
+          "isCrossRepository": false,
+          "updatedAt": "2026-01-01T00:00:00Z",
+          "headRefName": "many",
+          "baseRefName": "main",
+          "reviewDecision": "REVIEW_REQUIRED",
+          "reviewThreads": {
+            "totalCount": 101,
+            "nodes": [{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true},{"isResolved":true}]
+          },
+          "commits": { "nodes": [ { "commit": { "statusCheckRollup": { "state": "SUCCESS" } } } ] }
+        }
+      ]
+    }
+  }
+}

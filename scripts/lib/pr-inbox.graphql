@@ -1,0 +1,24 @@
+query PrInbox($reqq: String!, $mineq: String!) {
+  requested: search(query: $reqq, type: ISSUE, first: 50) {
+    issueCount
+    nodes {
+      ... on PullRequest {
+        number title url isDraft isCrossRepository updatedAt
+        author { login }
+        headRefName baseRefName
+      }
+    }
+  }
+  mine: search(query: $mineq, type: ISSUE, first: 50) {
+    issueCount
+    nodes {
+      ... on PullRequest {
+        number title url isDraft isCrossRepository updatedAt
+        headRefName baseRefName
+        reviewDecision
+        reviewThreads(first: 100) { totalCount nodes { isResolved } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}

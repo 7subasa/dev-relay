@@ -13,6 +13,9 @@
 #   gh api --hostname github.com graphql -f query=<pr-feedback.graphql の問い合わせ> -f owner=<OWNER> -f name=<REPO> -f head=<ブランチ> -q <pr-feedback.jq の式>
 #   gh api --hostname github.com graphql -f query=<pr-reply.graphql の ReplyThread> -f id=<スレッドの id> -F body=@<ファイル> -q .data.addPullRequestReviewThreadReply.comment.url
 #   gh api --hostname github.com graphql -f query=<pr-comment.graphql の AddComment> -f id=<PR の id> -F body=@<ファイル> -q .data.addComment.commentEdge.node.url
+#   gh api --hostname github.com graphql -f query=<pr-inbox.graphql の問い合わせ> -f reqq=<検索の式> -f mineq=<検索の式> -q <pr-inbox.jq の式>
+#   gh api --hostname github.com graphql -f query=<pr-review.graphql の問い合わせ> -f owner=<OWNER> -f name=<REPO> -F number=<番号> -f me=<アカウント> -q <pr-review.jq の式>
+#   gh api --hostname github.com graphql -f query=<AddReview の変更（pr-review.sh が組み立てる）> -f id=<PR の id> -f oid=<先頭の SHA> -F body=@<ファイル> [-f p<i>=<パス> -F l<i>=<行> -F b<i>=@<ファイル>]... -q .data.addPullRequestReview.pullRequestReview.url
 #   gh run view <run-id> -R github.com/<OWNER/REPO> --log-failed
 #   gh run view <run-id> -R github.com/<OWNER/REPO> --json attempt -q .attempt
 #   gh run rerun <run-id> -R github.com/<OWNER/REPO> --failed
